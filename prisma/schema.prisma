@@ -1,0 +1,215 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum UserRole {
+  SUPER_ADMIN
+  ADMIN
+  MANAGER
+  HR
+  ACCOUNTS
+  EMPLOYEE
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+enum OrganizationStatus {
+  TRIAL
+  ACTIVE
+  PAST_DUE
+  SUSPENDED
+  CANCELED
+}
+
+enum BillingPlan {
+  FREE_TRIAL
+  STARTER
+  GROWTH
+  ENTERPRISE
+}
+
+enum AttendanceDirection {
+  IN
+  OUT
+}
+
+enum TaskStatus {
+  NEW
+  COMPLETED
+}
+
+enum TaskPriority {
+  LOW
+  NORMAL
+  HIGH
+}
+
+enum ProjectStatus {
+  PLANNED
+  ACTIVE
+  COMPLETED
+  ARCHIVED
+}
+
+model User {
+  id             String     @id @default(cuid())
+  firebaseUid    String     @unique
+  email          String     @unique
+  fullName       String
+  role           UserRole   @default(EMPLOYEE)
+  status         UserStatus @default(ACTIVE)
+  contact        String?
+  designation    String?
+  department     String?
+  organizationId String
+  invitedById    String?
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+
+  assignedTasks Task[] @relation("AssignedTasks")
+  createdTasks  Task[] @relation("CreatedTasks")
+  createdProjects Project[] @relation("CreatedProjects")
+  invitedBy   User?   @relation("UserInvitations", fields: [invitedById], references: [id], onDelete: SetNull)
+  invitedUsers User[] @relation("UserInvitations")
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  attendanceScans AttendanceScan[]
+  timeLogs     TimeLog[]
+
+  @@index([organizationId, role])
+  @@index([organizationId, status])
+  @@index([invitedById])
+  @@index([role])
+  @@map("users")
+}
+
+model Organization {
+  id          String             @id @default(cuid())
+  name        String
+  slug        String             @unique
+  status      OrganizationStatus @default(TRIAL)
+  plan        BillingPlan        @default(FREE_TRIAL)
+  trialEndsAt DateTime
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+
+  projects Project[]
+  tasks    Task[]
+  users    User[]
+  attendanceScans AttendanceScan[]
+
+  @@index([status])
+  @@index([plan])
+  @@map("organizations")
+}
+
+model Project {
+  id          String        @id @default(cuid())
+  name        String
+  description String?
+  status      ProjectStatus @default(ACTIVE)
+  startDate   DateTime?
+  dueDate     DateTime?
+  aiProgress   Int           @default(0)
+  aiSummary    String?
+  aiAnalyzedAt DateTime?
+  organizationId String
+  createdById String
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  createdBy User   @relation("CreatedProjects", fields: [createdById], references: [id], onDelete: Cascade)
+  tasks     Task[]
+
+  @@index([organizationId, status])
+  @@index([createdById])
+  @@index([status])
+  @@index([name])
+  @@map("projects")
+}
+
+model Task {
+  id           String       @id @default(cuid())
+  title        String
+  description  String
+  successCriteria String?
+  deadline     DateTime?
+  category     String
+  priority     TaskPriority @default(NORMAL)
+  status       TaskStatus   @default(NEW)
+  completedAt  DateTime?
+  estimatedHours Decimal?   @db.Decimal(6, 2)
+  projectWeight Decimal      @default(0) @db.Decimal(5, 2)
+  aiProgress    Int          @default(0)
+  aiSummary     String?
+  aiAnalyzedAt  DateTime?
+  projectId    String?
+  organizationId String
+  assignedToId String
+  createdById  String
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  project    Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  assignedTo User @relation("AssignedTasks", fields: [assignedToId], references: [id], onDelete: Cascade)
+  createdBy  User @relation("CreatedTasks", fields: [createdById], references: [id], onDelete: Cascade)
+  timeLogs   TimeLog[]
+
+  @@index([organizationId, status])
+  @@index([projectId, status])
+  @@index([assignedToId, status])
+  @@index([createdById])
+  @@index([status])
+  @@map("tasks")
+}
+
+model TimeLog {
+  id        String   @id @default(cuid())
+  taskId    String
+  userId    String
+  hours     Decimal  @db.Decimal(6, 2)
+  note      String?
+  aiProgressAfter Int?
+  analysisSummary String?
+  loggedAt  DateTime @default(now())
+  createdAt DateTime @default(now())
+
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([taskId])
+  @@index([userId])
+  @@index([loggedAt])
+  @@map("time_logs")
+}
+
+model AttendanceScan {
+  id              String              @id @default(cuid())
+  organizationId  String
+  userId          String
+  direction       AttendanceDirection
+  source          String
+  scannedAt       DateTime            @default(now())
+  latitude        Decimal?            @db.Decimal(10, 7)
+  longitude       Decimal?            @db.Decimal(10, 7)
+  accuracyMeters  Decimal?            @db.Decimal(8, 2)
+  distanceMeters  Decimal?            @db.Decimal(8, 2)
+  accepted        Boolean             @default(true)
+  rejectionReason String?
+  createdAt       DateTime            @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, scannedAt])
+  @@index([userId, scannedAt])
+  @@map("attendance_scans")
+}
