@@ -4,17 +4,21 @@ const prisma = require("./src/db/prisma");
 
 validateEnv();
 
-const server = app.listen(env.port, () => {
-  console.log(`StaffFlow API listening on http://localhost:${env.port}`);
-});
-
-const shutdown = async (signal) => {
-  console.log(`${signal} received. Shutting down StaffFlow API...`);
-  server.close(async () => {
-    await prisma.$disconnect();
-    process.exit(0);
+if (process.env.VERCEL) {
+  module.exports = app;
+} else {
+  const server = app.listen(env.port, () => {
+    console.log(`StaffFlow API listening on http://localhost:${env.port}`);
   });
-};
 
-process.on("SIGINT", shutdown);
-process.on("SIGTERM", shutdown);
+  const shutdown = async (signal) => {
+    console.log(`${signal} received. Shutting down StaffFlow API...`);
+    server.close(async () => {
+      await prisma.$disconnect();
+      process.exit(0);
+    });
+  };
+
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+}
