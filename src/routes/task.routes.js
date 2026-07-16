@@ -10,6 +10,7 @@ router.use(authenticate);
 
 router.get("/", taskController.listTasks);
 router.get("/stats", taskController.getTaskStats);
+router.get("/:taskId", taskController.getTaskById);
 router.post(
   "/",
   requireRoles(USER_ROLES.SUPER_ADMIN, USER_ROLES.ADMIN, USER_ROLES.MANAGER, USER_ROLES.HR),
@@ -17,6 +18,11 @@ router.post(
 );
 router.post("/:taskId/time-logs", taskController.createTimeLog);
 router.patch("/:taskId/status", taskController.updateTaskStatus);
+router.patch(
+  "/:taskId",
+  requireRoles(USER_ROLES.SUPER_ADMIN, USER_ROLES.ADMIN, USER_ROLES.MANAGER, USER_ROLES.HR),
+  taskController.updateTask
+);
 router.delete(
   "/:taskId",
   requireRoles(USER_ROLES.SUPER_ADMIN, USER_ROLES.ADMIN, USER_ROLES.MANAGER, USER_ROLES.HR),

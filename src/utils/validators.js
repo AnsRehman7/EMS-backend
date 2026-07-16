@@ -17,6 +17,21 @@ const optionalNumber = (max = 9999) =>
     z.number().finite().nonnegative().max(max).optional()
   );
 
+const optionalNullableNumber = (max = 9999) =>
+  z.preprocess(
+    (value) => {
+      if (value === "" || value === null) return null;
+      if (value === undefined) return undefined;
+      return Number(value);
+    },
+    z.number().finite().nonnegative().max(max).nullable().optional()
+  );
+
+const optionalNullableId = z.preprocess(
+  (value) => (typeof value === "string" && value.trim() === "" ? null : value),
+  z.string().trim().min(1, "Choose a valid assignee.").nullable().optional()
+);
+
 const requiredNumber = (max = 9999) =>
   z.preprocess((value) => Number(value), z.number().finite().positive().max(max));
 
@@ -42,6 +57,18 @@ const roleValues = [
   "HR",
   "ACCOUNTS",
   "EMPLOYEE",
+];
+
+const taskStatusValues = [
+  "new",
+  "open",
+  "active",
+  "in_progress",
+  "completed",
+  "NEW",
+  "ACTIVE",
+  "IN_PROGRESS",
+  "COMPLETED",
 ];
 
 const syncProfileSchema = z.object({
@@ -74,18 +101,40 @@ const updateOrganizationUserSchema = z.object({
   status: z.enum(["active", "suspended", "ACTIVE", "SUSPENDED"]).optional(),
 });
 
-const createProjectSchema = z.object({
-  description: optionalTrimmedString(5000),
-  dueDate: optionalTrimmedString(40),
-  name: z.string().trim().min(1, "Project name is required.").max(160),
-  startDate: optionalTrimmedString(40),
-});
+const createProjectSchema = z
+  .object({
+    description: optionalTrimmedString(5000),
+    dueDate: optionalTrimmedString(40),
+    generateTasksWithAi: z.boolean().default(false),
+    name: z.string().trim().min(1, "Project name is required.").max(160),
+    startDate: optionalTrimmedString(40),
+    status: z.enum(["planned", "active", "PLANNED", "ACTIVE"]).optional(),
+  })
+  .superRefine((project, context) => {
+    if (!project.generateTasksWithAi) return;
+
+    if (!project.description || project.description.length < 40) {
+      context.addIssue({
+        code: "custom",
+        message: "Add at least 40 characters of project requirements for AI task planning.",
+        path: ["description"],
+      });
+    }
+
+    if (!project.dueDate) {
+      context.addIssue({
+        code: "custom",
+        message: "Set a project due date so Gemini can schedule the generated tasks.",
+        path: ["dueDate"],
+      });
+    }
+  });
 
 const updateProjectSchema = z.object({
-  description: optionalTrimmedString(5000),
-  dueDate: optionalTrimmedString(40),
+  description: z.string().trim().max(5000).optional(),
+  dueDate: z.string().trim().max(40).optional(),
   name: optionalTrimmedString(160),
-  startDate: optionalTrimmedString(40),
+  startDate: z.string().trim().max(40).optional(),
   status: z.enum(["planned", "active", "completed", "archived", "PLANNED", "ACTIVE", "COMPLETED", "ARCHIVED"]).optional(),
 });
 
@@ -98,7 +147,21 @@ const createTaskSchema = z.object({
   priority: z.enum(["low", "normal", "high", "LOW", "NORMAL", "HIGH"]).default("normal"),
   projectId: z.string().trim().min(1, "Choose a project before creating the task."),
   successCriteria: optionalTrimmedString(5000),
+  status: z.enum(taskStatusValues).default("open"),
   title: z.string().trim().min(1, "Task title is required.").max(160),
+});
+
+const updateTaskSchema = z.object({
+  assignedToId: optionalNullableId,
+  category: z.string().trim().min(1, "Category is required.").max(80).optional(),
+  deadline: z.string().trim().max(40).optional(),
+  description: z.string().trim().min(1, "Description is required.").max(5000).optional(),
+  estimatedHours: optionalNullableNumber(999.99),
+  priority: z.enum(["low", "normal", "high", "LOW", "NORMAL", "HIGH"]).optional(),
+  projectId: z.string().trim().min(1, "Choose a valid project.").optional(),
+  status: z.enum(taskStatusValues).optional(),
+  successCriteria: z.string().trim().max(5000).optional(),
+  title: z.string().trim().min(1, "Task title is required.").max(160).optional(),
 });
 
 const createTimeLogSchema = z.object({
@@ -118,7 +181,7 @@ const createAttendanceScanSchema = z.object({
 });
 
 const updateTaskStatusSchema = z.object({
-  status: z.enum(["new", "completed", "NEW", "COMPLETED"]),
+  status: z.enum(taskStatusValues),
 });
 
 const updateUserRoleSchema = z.object({
@@ -137,6 +200,7 @@ module.exports = {
   syncProfileSchema,
   updateOrganizationUserSchema,
   updateProjectSchema,
+  updateTaskSchema,
   updateTaskStatusSchema,
   updateUserRoleSchema,
 };

@@ -4,7 +4,10 @@ const { canManageWork, canViewOrganizationWork } = require("../utils/roles");
 const { analyzeTaskProgress, refreshProjectWeights, updateProjectProgress } = require("./analysis.service");
 
 const normalizePriority = (priority = "normal") => String(priority).trim().toUpperCase();
-const normalizeStatus = (status = "new") => String(status).trim().toUpperCase();
+const normalizeStatus = (status = "open") => {
+  const value = String(status).trim().toUpperCase();
+  return value === "OPEN" ? "NEW" : value;
+};
 const toNumber = (value) => (value === null || value === undefined ? null : Number(value));
 
 const parseDate = (value, label) => {
@@ -52,7 +55,7 @@ const serializeTask = (task) => ({
   projectId: task.projectId || "",
   projectName: task.project?.name || "Unassigned project",
   projectWeight: toNumber(task.projectWeight) || 0,
-  status: String(task.status).toLowerCase(),
+  status: String(task.status) === "NEW" ? "open" : String(task.status).toLowerCase(),
   successCriteria: task.successCriteria || "",
   timeLogs: (task.timeLogs || []).map(serializeTimeLog),
   title: task.title,
@@ -131,6 +134,7 @@ const createTask = async (currentUser, payload) => {
       priority: normalizePriority(payload.priority),
       projectId: payload.projectId,
       successCriteria: payload.successCriteria || null,
+      status: normalizeStatus(payload.status),
       title: payload.title,
     },
     include: taskInclude,
@@ -164,6 +168,95 @@ const getTaskForAction = async (taskId, currentUser) => {
   }
 
   return task;
+};
+
+const getTaskById = async (taskId, currentUser) => {
+  const task = await prisma.task.findFirst({
+    include: taskInclude,
+    where: {
+      id: taskId,
+      organizationId: currentUser.organizationId,
+    },
+  });
+
+  if (!task) {
+    throw new ApiError(404, "Task not found.");
+  }
+
+  if (!canViewOrganizationWork(currentUser) && task.assignedToId !== currentUser.id) {
+    throw new ApiError(403, "You can only view tasks assigned to you.");
+  }
+
+  return serializeTask(task);
+};
+
+const updateTask = async (taskId, currentUser, payload) => {
+  if (!canManageWork(currentUser)) {
+    throw new ApiError(403, "You do not have permission to edit tasks.");
+  }
+
+  const existingTask = await getTaskForAction(taskId, currentUser);
+  const data = {};
+
+  if (payload.assignedToId !== undefined) {
+    if (payload.assignedToId === null) {
+      data.assignedToId = null;
+    } else {
+      const assignee = await prisma.user.findFirst({
+        where: {
+          id: payload.assignedToId,
+          organizationId: currentUser.organizationId,
+          status: "ACTIVE",
+        },
+      });
+
+      if (!assignee) throw new ApiError(400, "Choose a valid active team member.");
+      data.assignedToId = assignee.id;
+    }
+  }
+
+  if (payload.projectId !== undefined) {
+    const project = await prisma.project.findFirst({
+      where: {
+        id: payload.projectId,
+        organizationId: currentUser.organizationId,
+      },
+    });
+
+    if (!project || project.status === "ARCHIVED") {
+      throw new ApiError(400, "Choose a valid non-archived project.");
+    }
+    data.projectId = project.id;
+  }
+
+  if (payload.category !== undefined) data.category = payload.category;
+  if (payload.deadline !== undefined) data.deadline = parseDate(payload.deadline, "Deadline");
+  if (payload.description !== undefined) data.description = payload.description;
+  if (payload.estimatedHours !== undefined) data.estimatedHours = payload.estimatedHours;
+  if (payload.priority !== undefined) data.priority = normalizePriority(payload.priority);
+  if (payload.successCriteria !== undefined) data.successCriteria = payload.successCriteria || null;
+  if (payload.title !== undefined) data.title = payload.title;
+
+  if (payload.status !== undefined) {
+    const status = normalizeStatus(payload.status);
+    data.status = status;
+    data.aiAnalyzedAt = new Date();
+    data.aiProgress = status === "COMPLETED" ? 100 : Math.min(existingTask.aiProgress || 0, 95);
+    data.completedAt = status === "COMPLETED" ? new Date() : null;
+  }
+
+  await prisma.task.update({ data, where: { id: taskId } });
+
+  const nextProjectId = data.projectId || existingTask.projectId;
+  if (data.projectId && data.projectId !== existingTask.projectId) {
+    await refreshProjectWeights(existingTask.projectId, currentUser.organizationId);
+    await refreshProjectWeights(data.projectId, currentUser.organizationId);
+  } else if (payload.status !== undefined) {
+    await updateProjectProgress(nextProjectId, currentUser.organizationId);
+  }
+
+  const updatedTask = await prisma.task.findUnique({ include: taskInclude, where: { id: taskId } });
+  return serializeTask(updatedTask);
 };
 
 const updateTaskStatus = async (taskId, status, currentUser) => {
@@ -237,7 +330,7 @@ const getTaskStats = async (currentUser) => {
   const [total, completed, active] = await Promise.all([
     prisma.task.count({ where }),
     prisma.task.count({ where: { ...where, status: "COMPLETED" } }),
-    prisma.task.count({ where: { ...where, status: "NEW" } }),
+    prisma.task.count({ where: { ...where, status: { not: "COMPLETED" } } }),
   ]);
 
   return { active, completed, total };
@@ -247,9 +340,11 @@ module.exports = {
   createTimeLog,
   createTask,
   deleteTask,
+  getTaskById,
   getTaskStats,
   listTasks,
   serializeTask,
   taskInclude,
+  updateTask,
   updateTaskStatus,
 };

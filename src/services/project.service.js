@@ -2,6 +2,7 @@ const prisma = require("../db/prisma");
 const ApiError = require("../utils/apiError");
 const { canManageWork, canViewOrganizationWork } = require("../utils/roles");
 const { calculateWeightedProjectProgress } = require("./analysis.service");
+const { generateProjectTaskPlan } = require("./projectPlanning.service");
 const { serializeTask, taskInclude } = require("./task.service");
 
 const normalizeProjectStatus = (status = "active") => String(status).trim().toUpperCase();
@@ -146,31 +147,74 @@ const createProject = async (currentUser, payload) => {
   const dueDate = parseDate(payload.dueDate, "Due date");
   validateProjectDates(startDate, dueDate);
 
-  const project = await prisma.project.create({
-    data: {
-      createdById: currentUser.id,
-      description: payload.description || null,
-      dueDate,
-      name: payload.name,
-      organizationId: currentUser.organizationId,
-      startDate,
-      status: startDate && startDate.getTime() > Date.now() ? "PLANNED" : "ACTIVE",
-    },
-    include: {
-      createdBy: true,
-      tasks: {
-        select: {
-          status: true,
-          aiProgress: true,
-          projectWeight: true,
-          timeLogs: {
-            select: {
-              hours: true,
+  const taskPlan = payload.generateTasksWithAi
+    ? await generateProjectTaskPlan({
+        description: payload.description,
+        dueDate,
+        name: payload.name,
+        startDate,
+      })
+    : null;
+
+  const projectStatus = payload.status
+    ? normalizeProjectStatus(payload.status)
+    : startDate && startDate.getTime() > Date.now()
+      ? "PLANNED"
+      : "ACTIVE";
+
+  const project = await prisma.$transaction(async (transaction) => {
+    const createdProject = await transaction.project.create({
+      data: {
+        aiAnalyzedAt: taskPlan ? new Date() : null,
+        aiSummary: taskPlan?.summary || null,
+        createdById: currentUser.id,
+        description: payload.description || null,
+        dueDate,
+        name: payload.name,
+        organizationId: currentUser.organizationId,
+        startDate,
+        status: projectStatus,
+      },
+    });
+
+    if (taskPlan) {
+      await transaction.task.createMany({
+        data: taskPlan.tasks.map((task) => ({
+          assignedToId: null,
+          category: task.category,
+          createdById: currentUser.id,
+          deadline: parseDate(task.deadline, "Generated task deadline"),
+          description: task.description,
+          estimatedHours: task.estimatedHours,
+          organizationId: currentUser.organizationId,
+          priority: task.priority,
+          projectId: createdProject.id,
+          projectWeight: task.projectWeight,
+          status: "NEW",
+          successCriteria: task.successCriteria,
+          title: task.title,
+        })),
+      });
+    }
+
+    return transaction.project.findUnique({
+      include: {
+        createdBy: true,
+        tasks: {
+          select: {
+            aiProgress: true,
+            projectWeight: true,
+            status: true,
+            timeLogs: {
+              select: {
+                hours: true,
+              },
             },
           },
         },
       },
-    },
+      where: { id: createdProject.id },
+    });
   });
 
   return serializeProject(project);
