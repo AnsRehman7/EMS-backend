@@ -25,6 +25,12 @@ const csv = (value = "") =>
     .map((item) => item.trim().toLowerCase())
     .filter(Boolean);
 
+const csvValues = (value = "") =>
+  value
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+
 const toNumber = (value, fallback = undefined) => {
   if (value === undefined || value === "") return fallback;
   const parsed = Number(value);
@@ -34,7 +40,7 @@ const toNumber = (value, fallback = undefined) => {
 const env = {
   allowClientRoleSelection: toBoolean(process.env.ALLOW_CLIENT_ROLE_SELECTION, false),
   bootstrapAdminEmails: csv(process.env.BOOTSTRAP_ADMIN_EMAILS),
-  corsOrigin: process.env.CORS_ORIGIN || "http://localhost:5173",
+  corsOrigins: csvValues(process.env.CORS_ORIGIN || "http://localhost:5173"),
   databaseUrl:
     process.env.DATABASE_URL || "postgresql://postgres:postgre@localhost:5432/postgres?schema=public",
   firebaseClientEmail: process.env.FIREBASE_CLIENT_EMAIL,

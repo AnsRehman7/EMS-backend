@@ -14,7 +14,13 @@ app.use(helmet());
 app.use(
   cors({
     credentials: true,
-    origin: env.corsOrigin,
+    origin(origin, callback) {
+      if (!origin || env.corsOrigins.includes("*") || env.corsOrigins.includes(origin)) {
+        return callback(null, true);
+      }
+
+      return callback(null, false);
+    },
   })
 );
 app.use(express.json({ limit: "1mb" }));

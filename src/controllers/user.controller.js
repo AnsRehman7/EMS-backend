@@ -5,6 +5,7 @@ const {
   parseBody,
   updateOrganizationUserSchema,
   updateUserRoleSchema,
+  updateUserPermissionsSchema,
 } = require("../utils/validators");
 
 const listEmployees = asyncHandler(async (req, res) => {
@@ -43,6 +44,17 @@ const updateUserRole = asyncHandler(async (req, res) => {
   res.status(200).json({ data: { user } });
 });
 
+const getPermissionCatalog = asyncHandler(async (req, res) => {
+  const catalog = userService.getWorkspacePermissionCatalog(req.user);
+  res.status(200).json({ data: catalog });
+});
+
+const updateUserPermissions = asyncHandler(async (req, res) => {
+  const payload = parseBody(updateUserPermissionsSchema, req.body);
+  const user = await userService.updateUserPermissions(req.user, req.params.userId, payload);
+  res.status(200).json({ data: { user } });
+});
+
 const deleteUser = asyncHandler(async (req, res) => {
   const user = await userService.deleteOrganizationUser(req.user, req.params.userId);
   res.status(200).json({ data: { user } });
@@ -52,8 +64,10 @@ module.exports = {
   createUser,
   deleteUser,
   getUserById,
+  getPermissionCatalog,
   listEmployees,
   listUsers,
   updateUser,
+  updateUserPermissions,
   updateUserRole,
 };

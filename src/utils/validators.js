@@ -71,6 +71,10 @@ const taskStatusValues = [
   "COMPLETED",
 ];
 
+const projectPriorityValues = ["low", "normal", "high", "critical", "LOW", "NORMAL", "HIGH", "CRITICAL"];
+const permissionKeySchema = z.string().trim().min(1).max(80);
+const projectTagsSchema = z.array(z.string().trim().min(1).max(40)).max(12);
+
 const syncProfileSchema = z.object({
   contact: optionalTrimmedString(40),
   department: optionalTrimmedString(120),
@@ -103,12 +107,20 @@ const updateOrganizationUserSchema = z.object({
 
 const createProjectSchema = z
   .object({
+    clientName: optionalTrimmedString(160),
+    code: optionalTrimmedString(32),
+    department: optionalTrimmedString(120),
     description: optionalTrimmedString(5000),
     dueDate: optionalTrimmedString(40),
+    estimatedHours: optionalNumber(999999.99),
     generateTasksWithAi: z.boolean().default(false),
     name: z.string().trim().min(1, "Project name is required.").max(160),
+    objective: optionalTrimmedString(5000),
+    ownerId: optionalTrimmedString(80),
+    priority: z.enum(projectPriorityValues).default("normal"),
     startDate: optionalTrimmedString(40),
     status: z.enum(["planned", "active", "PLANNED", "ACTIVE"]).optional(),
+    tags: projectTagsSchema.default([]),
   })
   .superRefine((project, context) => {
     if (!project.generateTasksWithAi) return;
@@ -131,11 +143,19 @@ const createProjectSchema = z
   });
 
 const updateProjectSchema = z.object({
+  clientName: z.string().trim().max(160).optional(),
+  code: z.string().trim().max(32).optional(),
+  department: z.string().trim().max(120).optional(),
   description: z.string().trim().max(5000).optional(),
   dueDate: z.string().trim().max(40).optional(),
+  estimatedHours: optionalNullableNumber(999999.99),
   name: optionalTrimmedString(160),
+  objective: z.string().trim().max(5000).optional(),
+  ownerId: optionalNullableId,
+  priority: z.enum(projectPriorityValues).optional(),
   startDate: z.string().trim().max(40).optional(),
   status: z.enum(["planned", "active", "completed", "archived", "PLANNED", "ACTIVE", "COMPLETED", "ARCHIVED"]).optional(),
+  tags: projectTagsSchema.optional(),
 });
 
 const createTaskSchema = z.object({
@@ -188,6 +208,18 @@ const updateUserRoleSchema = z.object({
   role: z.enum(roleValues),
 });
 
+const updateCurrentProfileSchema = z.object({
+  contact: optionalTrimmedString(40),
+  department: optionalTrimmedString(120),
+  designation: optionalTrimmedString(120),
+  fullName: z.string().trim().min(1, "Full name is required.").max(120),
+});
+
+const updateUserPermissionsSchema = z.object({
+  permissions: z.array(permissionKeySchema).max(50).default([]),
+  useRoleDefaults: z.boolean().default(false),
+});
+
 const parseBody = (schema, body) => schema.parse(body || {});
 
 module.exports = {
@@ -198,9 +230,11 @@ module.exports = {
   createTimeLogSchema,
   parseBody,
   syncProfileSchema,
+  updateCurrentProfileSchema,
   updateOrganizationUserSchema,
   updateProjectSchema,
   updateTaskSchema,
   updateTaskStatusSchema,
   updateUserRoleSchema,
+  updateUserPermissionsSchema,
 };

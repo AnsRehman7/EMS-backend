@@ -1,8 +1,8 @@
 const express = require("express");
 const projectController = require("../controllers/project.controller");
 const { authenticate } = require("../middlewares/auth.middleware");
-const { requireRoles } = require("../middlewares/role.middleware");
-const { USER_ROLES } = require("../utils/roles");
+const { requirePermission } = require("../middlewares/role.middleware");
+const { PERMISSIONS } = require("../utils/permissions");
 
 const router = express.Router();
 
@@ -12,17 +12,17 @@ router.get("/", projectController.listProjects);
 router.get("/:projectId", projectController.getProjectById);
 router.post(
   "/",
-  requireRoles(USER_ROLES.SUPER_ADMIN, USER_ROLES.ADMIN, USER_ROLES.MANAGER, USER_ROLES.HR),
+  requirePermission(PERMISSIONS.PROJECTS_CREATE),
   projectController.createProject
 );
 router.patch(
   "/:projectId",
-  requireRoles(USER_ROLES.SUPER_ADMIN, USER_ROLES.ADMIN, USER_ROLES.MANAGER, USER_ROLES.HR),
+  requirePermission(PERMISSIONS.PROJECTS_EDIT),
   projectController.updateProject
 );
 router.delete(
   "/:projectId",
-  requireRoles(USER_ROLES.SUPER_ADMIN, USER_ROLES.ADMIN, USER_ROLES.MANAGER, USER_ROLES.HR),
+  requirePermission(PERMISSIONS.PROJECTS_DELETE),
   projectController.deleteProject
 );
 

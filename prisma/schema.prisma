@@ -60,29 +60,41 @@ enum ProjectStatus {
   ARCHIVED
 }
 
-model User {
-  id             String     @id @default(cuid())
-  firebaseUid    String     @unique
-  email          String     @unique
-  fullName       String
-  role           UserRole   @default(EMPLOYEE)
-  status         UserStatus @default(ACTIVE)
-  contact        String?
-  designation    String?
-  department     String?
-  organizationId String
-  invitedById    String?
-  createdAt      DateTime   @default(now())
-  updatedAt      DateTime   @updatedAt
+enum ProjectPriority {
+  LOW
+  NORMAL
+  HIGH
+  CRITICAL
+}
 
-  assignedTasks Task[] @relation("AssignedTasks")
-  createdTasks  Task[] @relation("CreatedTasks")
-  createdProjects Project[] @relation("CreatedProjects")
-  invitedBy   User?   @relation("UserInvitations", fields: [invitedById], references: [id], onDelete: SetNull)
-  invitedUsers User[] @relation("UserInvitations")
-  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
-  attendanceScans AttendanceScan[]
-  timeLogs     TimeLog[]
+model User {
+  id                    String     @id @default(cuid())
+  firebaseUid           String     @unique
+  email                 String     @unique
+  fullName              String
+  role                  UserRole   @default(EMPLOYEE)
+  status                UserStatus @default(ACTIVE)
+  contact               String?
+  designation           String?
+  department            String?
+  customPermissions     String[]   @default([])
+  usesCustomPermissions Boolean    @default(false)
+  organizationId        String
+  invitedById           String?
+  createdAt             DateTime   @default(now())
+  updatedAt             DateTime   @updatedAt
+
+  assignedTasks         Task[]           @relation("AssignedTasks")
+  createdTasks          Task[]           @relation("CreatedTasks")
+  createdProjects       Project[]        @relation("CreatedProjects")
+  ownedProjects         Project[]        @relation("OwnedProjects")
+  invitedBy             User?            @relation("UserInvitations", fields: [invitedById], references: [id], onDelete: SetNull)
+  invitedUsers          User[]           @relation("UserInvitations")
+  organization          Organization     @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  attendanceScans       AttendanceScan[]
+  timeLogs              TimeLog[]
+  receivedNotifications Notification[]   @relation("NotificationRecipient")
+  sentNotifications     Notification[]   @relation("NotificationActor")
 
   @@index([organizationId, role])
   @@index([organizationId, status])
@@ -101,10 +113,11 @@ model Organization {
   createdAt   DateTime           @default(now())
   updatedAt   DateTime           @updatedAt
 
-  projects Project[]
-  tasks    Task[]
-  users    User[]
+  projects        Project[]
+  tasks           Task[]
+  users           User[]
   attendanceScans AttendanceScan[]
+  notifications   Notification[]
 
   @@index([status])
   @@index([plan])
@@ -112,58 +125,69 @@ model Organization {
 }
 
 model Project {
-  id          String        @id @default(cuid())
-  name        String
-  description String?
-  status      ProjectStatus @default(ACTIVE)
-  startDate   DateTime?
-  dueDate     DateTime?
-  aiProgress   Int           @default(0)
-  aiSummary    String?
-  aiAnalyzedAt DateTime?
+  id             String          @id @default(cuid())
+  name           String
+  code           String?
+  description    String?
+  objective      String?
+  status         ProjectStatus   @default(ACTIVE)
+  priority       ProjectPriority @default(NORMAL)
+  startDate      DateTime?
+  dueDate        DateTime?
+  department     String?
+  clientName     String?
+  estimatedHours Decimal?        @db.Decimal(8, 2)
+  tags           String[]        @default([])
+  aiProgress     Int             @default(0)
+  aiSummary      String?
+  aiAnalyzedAt   DateTime?
   organizationId String
-  createdById String
-  createdAt   DateTime      @default(now())
-  updatedAt   DateTime      @updatedAt
+  createdById    String
+  ownerId        String?
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
-  createdBy User   @relation("CreatedProjects", fields: [createdById], references: [id], onDelete: Cascade)
-  tasks     Task[]
+  createdBy    User         @relation("CreatedProjects", fields: [createdById], references: [id], onDelete: Cascade)
+  owner        User?        @relation("OwnedProjects", fields: [ownerId], references: [id], onDelete: SetNull)
+  tasks        Task[]
 
+  @@unique([organizationId, code])
   @@index([organizationId, status])
   @@index([createdById])
+  @@index([ownerId])
   @@index([status])
   @@index([name])
   @@map("projects")
 }
 
 model Task {
-  id           String       @id @default(cuid())
-  title        String
-  description  String
+  id              String       @id @default(cuid())
+  title           String
+  description     String
   successCriteria String?
-  deadline     DateTime?
-  category     String
-  priority     TaskPriority @default(NORMAL)
-  status       TaskStatus   @default(NEW)
-  completedAt  DateTime?
-  estimatedHours Decimal?   @db.Decimal(6, 2)
-  projectWeight Decimal      @default(0) @db.Decimal(5, 2)
-  aiProgress    Int          @default(0)
-  aiSummary     String?
-  aiAnalyzedAt  DateTime?
-  projectId    String?
-  organizationId String
-  assignedToId String?
-  createdById  String
-  createdAt    DateTime     @default(now())
-  updatedAt    DateTime     @updatedAt
+  deadline        DateTime?
+  category        String
+  priority        TaskPriority @default(NORMAL)
+  status          TaskStatus   @default(NEW)
+  completedAt     DateTime?
+  estimatedHours  Decimal?     @db.Decimal(6, 2)
+  projectWeight   Decimal      @default(0) @db.Decimal(5, 2)
+  aiProgress      Int          @default(0)
+  aiSummary       String?
+  aiAnalyzedAt    DateTime?
+  projectId       String?
+  organizationId  String
+  assignedToId    String?
+  createdById     String
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
-  project    Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
-  assignedTo User? @relation("AssignedTasks", fields: [assignedToId], references: [id], onDelete: SetNull)
-  createdBy  User @relation("CreatedTasks", fields: [createdById], references: [id], onDelete: Cascade)
-  timeLogs   TimeLog[]
+  project      Project?     @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  assignedTo   User?        @relation("AssignedTasks", fields: [assignedToId], references: [id], onDelete: SetNull)
+  createdBy    User         @relation("CreatedTasks", fields: [createdById], references: [id], onDelete: Cascade)
+  timeLogs     TimeLog[]
 
   @@index([organizationId, status])
   @@index([projectId, status])
@@ -174,15 +198,15 @@ model Task {
 }
 
 model TimeLog {
-  id        String   @id @default(cuid())
-  taskId    String
-  userId    String
-  hours     Decimal  @db.Decimal(6, 2)
-  note      String?
+  id              String   @id @default(cuid())
+  taskId          String
+  userId          String
+  hours           Decimal  @db.Decimal(6, 2)
+  note            String?
   aiProgressAfter Int?
   analysisSummary String?
-  loggedAt  DateTime @default(now())
-  createdAt DateTime @default(now())
+  loggedAt        DateTime @default(now())
+  createdAt       DateTime @default(now())
 
   task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -214,4 +238,28 @@ model AttendanceScan {
   @@index([organizationId, scannedAt])
   @@index([userId, scannedAt])
   @@map("attendance_scans")
+}
+
+model Notification {
+  id             String    @id @default(cuid())
+  organizationId String
+  recipientId    String
+  actorId        String?
+  type           String
+  title          String
+  message        String
+  entityType     String?
+  entityId       String?
+  actionUrl      String?
+  readAt         DateTime?
+  createdAt      DateTime  @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  recipient    User         @relation("NotificationRecipient", fields: [recipientId], references: [id], onDelete: Cascade)
+  actor        User?        @relation("NotificationActor", fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([recipientId, readAt, createdAt])
+  @@index([organizationId, createdAt])
+  @@index([entityType, entityId])
+  @@map("notifications")
 }

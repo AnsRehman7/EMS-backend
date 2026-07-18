@@ -1,8 +1,8 @@
 const express = require("express");
 const taskController = require("../controllers/task.controller");
 const { authenticate } = require("../middlewares/auth.middleware");
-const { requireRoles } = require("../middlewares/role.middleware");
-const { USER_ROLES } = require("../utils/roles");
+const { requirePermission } = require("../middlewares/role.middleware");
+const { PERMISSIONS } = require("../utils/permissions");
 
 const router = express.Router();
 
@@ -13,19 +13,19 @@ router.get("/stats", taskController.getTaskStats);
 router.get("/:taskId", taskController.getTaskById);
 router.post(
   "/",
-  requireRoles(USER_ROLES.SUPER_ADMIN, USER_ROLES.ADMIN, USER_ROLES.MANAGER, USER_ROLES.HR),
+  requirePermission(PERMISSIONS.TASKS_CREATE),
   taskController.createTask
 );
 router.post("/:taskId/time-logs", taskController.createTimeLog);
 router.patch("/:taskId/status", taskController.updateTaskStatus);
 router.patch(
   "/:taskId",
-  requireRoles(USER_ROLES.SUPER_ADMIN, USER_ROLES.ADMIN, USER_ROLES.MANAGER, USER_ROLES.HR),
+  requirePermission(PERMISSIONS.TASKS_EDIT),
   taskController.updateTask
 );
 router.delete(
   "/:taskId",
-  requireRoles(USER_ROLES.SUPER_ADMIN, USER_ROLES.ADMIN, USER_ROLES.MANAGER, USER_ROLES.HR),
+  requirePermission(PERMISSIONS.TASKS_DELETE),
   taskController.deleteTask
 );
 

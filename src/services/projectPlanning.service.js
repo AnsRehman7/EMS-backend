@@ -107,7 +107,18 @@ const normalizeTaskPlan = (rawPlan, { dueDate, startDate }) => {
   };
 };
 
-const buildProjectPlanPrompt = ({ description, dueDate, name, startDate }) => {
+const buildProjectPlanPrompt = ({
+  clientName,
+  department,
+  description,
+  dueDate,
+  estimatedHours,
+  name,
+  objective,
+  priority,
+  startDate,
+  tags,
+}) => {
   const planningStart = toDateKey(startDate) || toDateKey(new Date());
   const planningEnd = toDateKey(dueDate);
 
@@ -146,7 +157,22 @@ JSON schema:
 }
 
 Project data:
-${JSON.stringify({ description, dueDate: planningEnd, name, startDate: planningStart }, null, 2)}
+${JSON.stringify(
+  {
+    clientName,
+    department,
+    description,
+    dueDate: planningEnd,
+    estimatedHours,
+    name,
+    objective,
+    priority,
+    startDate: planningStart,
+    tags,
+  },
+  null,
+  2,
+)}
 `;
 };
 

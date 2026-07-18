@@ -1,8 +1,8 @@
 const express = require("express");
 const userController = require("../controllers/user.controller");
 const { authenticate } = require("../middlewares/auth.middleware");
-const { requireRoles } = require("../middlewares/role.middleware");
-const { USER_ROLES } = require("../utils/roles");
+const { requireAnyPermission, requirePermission } = require("../middlewares/role.middleware");
+const { PERMISSIONS } = require("../utils/permissions");
 
 const router = express.Router();
 
@@ -10,22 +10,34 @@ router.use(authenticate);
 
 router.get(
   "/employees",
-  requireRoles(USER_ROLES.SUPER_ADMIN, USER_ROLES.ADMIN, USER_ROLES.MANAGER, USER_ROLES.HR, USER_ROLES.ACCOUNTS),
+  requireAnyPermission(
+    PERMISSIONS.TASKS_CREATE,
+    PERMISSIONS.PROJECTS_CREATE,
+    PERMISSIONS.PROJECTS_EDIT,
+    PERMISSIONS.USERS_VIEW,
+    PERMISSIONS.ATTENDANCE_VIEW_ALL,
+  ),
   userController.listEmployees
 );
-router.get("/", requireRoles(USER_ROLES.SUPER_ADMIN, USER_ROLES.ADMIN, USER_ROLES.HR), userController.listUsers);
+router.get("/permissions/catalog", requirePermission(PERMISSIONS.USERS_VIEW), userController.getPermissionCatalog);
+router.get("/", requirePermission(PERMISSIONS.USERS_VIEW), userController.listUsers);
 router.get(
   "/:userId",
-  requireRoles(USER_ROLES.SUPER_ADMIN, USER_ROLES.ADMIN, USER_ROLES.HR),
+  requirePermission(PERMISSIONS.USERS_VIEW),
   userController.getUserById
 );
-router.post("/", requireRoles(USER_ROLES.SUPER_ADMIN, USER_ROLES.ADMIN, USER_ROLES.HR), userController.createUser);
-router.patch("/:userId", requireRoles(USER_ROLES.SUPER_ADMIN, USER_ROLES.ADMIN, USER_ROLES.HR), userController.updateUser);
+router.post("/", requirePermission(PERMISSIONS.USERS_MANAGE), userController.createUser);
+router.patch("/:userId", requirePermission(PERMISSIONS.USERS_MANAGE), userController.updateUser);
 router.patch(
   "/:userId/role",
-  requireRoles(USER_ROLES.SUPER_ADMIN, USER_ROLES.ADMIN, USER_ROLES.HR),
+  requirePermission(PERMISSIONS.USERS_MANAGE),
   userController.updateUserRole
 );
-router.delete("/:userId", requireRoles(USER_ROLES.SUPER_ADMIN, USER_ROLES.ADMIN), userController.deleteUser);
+router.patch(
+  "/:userId/permissions",
+  requirePermission(PERMISSIONS.PERMISSIONS_MANAGE),
+  userController.updateUserPermissions,
+);
+router.delete("/:userId", requirePermission(PERMISSIONS.USERS_MANAGE), userController.deleteUser);
 
 module.exports = router;

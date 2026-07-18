@@ -2,6 +2,13 @@ const prisma = require("../db/prisma");
 const ApiError = require("../utils/apiError");
 const { firebaseAuth } = require("../config/firebaseAdmin");
 const {
+  getPermissionCatalog,
+  hasPermission,
+  isKnownPermission,
+  PERMISSIONS,
+  resolvePermissions,
+} = require("../utils/permissions");
+const {
   canAssignRole,
   canManageBilling,
   canManageUsers,
@@ -15,7 +22,10 @@ const {
 const normalizeEmail = (email = "") => email.trim().toLowerCase();
 const normalizeStatus = (status = "active") => String(status || "active").trim().toUpperCase();
 
-const serializeUser = (user) => ({
+const serializeUser = (user) => {
+  const assignedPermissions = resolvePermissions(user);
+
+  return {
   contact: user.contact || "",
   department: user.department || "",
   designation: user.designation || "",
@@ -34,15 +44,27 @@ const serializeUser = (user) => ({
     : null,
   organizationId: user.organizationId,
   permissions: {
+    assigned: assignedPermissions,
+    canCreateProjects: hasPermission(user, PERMISSIONS.PROJECTS_CREATE),
+    canCreateTasks: hasPermission(user, PERMISSIONS.TASKS_CREATE),
+    canDeleteProjects: hasPermission(user, PERMISSIONS.PROJECTS_DELETE),
+    canDeleteTasks: hasPermission(user, PERMISSIONS.TASKS_DELETE),
+    canEditProjects: hasPermission(user, PERMISSIONS.PROJECTS_EDIT),
+    canEditTasks: hasPermission(user, PERMISSIONS.TASKS_EDIT),
     canManageBilling: canManageBilling(user),
+    canManagePermissions: hasPermission(user, PERMISSIONS.PERMISSIONS_MANAGE),
     canManageUsers: canManageUsers(user),
     canManageWork: canManageWork(user),
+    canViewUsers: hasPermission(user, PERMISSIONS.USERS_VIEW),
+    canViewDashboard: hasPermission(user, PERMISSIONS.DASHBOARD_VIEW),
     canViewOrganizationWork: canViewOrganizationWork(user),
+    usesRoleDefaults: !user.usesCustomPermissions,
   },
   role: toClientRole(user.role),
   status: String(user.status || "ACTIVE").toLowerCase(),
   uid: user.firebaseUid,
-});
+  };
+};
 
 const slugify = (value = "") =>
   value
@@ -108,26 +130,33 @@ const syncUserProfile = async (firebaseUser, payload = {}) => {
     throw new ApiError(400, "Firebase account must have an email address.");
   }
 
-  const existingUser = await prisma.user.findUnique({
+  const existingUser = await prisma.user.findFirst({
     include: {
       organization: true,
     },
-    where: { firebaseUid },
+    where: {
+      OR: [{ firebaseUid }, { email }],
+    },
   });
 
   if (existingUser) {
+    if (existingUser.firebaseUid !== firebaseUid && !firebaseUser.email_verified) {
+      throw new ApiError(403, "Verify this email with Google before connecting it to a workspace account.");
+    }
+
     const updatedUser = await prisma.user.update({
       data: {
         contact: payload.contact ?? existingUser.contact,
         department: payload.department ?? existingUser.department,
         designation: payload.designation ?? existingUser.designation,
         email,
+        firebaseUid,
         fullName: payload.fullName || existingUser.fullName,
       },
       include: {
         organization: true,
       },
-      where: { firebaseUid },
+      where: { id: existingUser.id },
     });
 
     return serializeUser(updatedUser);
@@ -176,6 +205,29 @@ const syncUserProfile = async (firebaseUser, payload = {}) => {
 };
 
 const getCurrentUser = (user) => serializeUser(user);
+
+const updateCurrentProfile = async (currentUser, payload) => {
+  const updatedUser = await prisma.user.update({
+    data: {
+      contact: payload.contact ?? currentUser.contact,
+      department: payload.department ?? currentUser.department,
+      designation: payload.designation ?? currentUser.designation,
+      fullName: payload.fullName || currentUser.fullName,
+    },
+    include: {
+      organization: true,
+    },
+    where: { id: currentUser.id },
+  });
+
+  if (payload.fullName && payload.fullName !== currentUser.fullName) {
+    await firebaseAuth.updateUser(currentUser.firebaseUid, { displayName: payload.fullName }).catch((error) => {
+      console.warn("Unable to update Firebase display name:", error.message);
+    });
+  }
+
+  return serializeUser(updatedUser);
+};
 
 const listEmployees = async (currentUser) => {
   ensureOrganization(currentUser);
@@ -343,6 +395,9 @@ const updateOrganizationUser = async (currentUser, userId, payload) => {
       fullName: payload.fullName || existingUser.fullName,
       role: nextRole,
       status: nextStatus,
+      ...(payload.role && nextRole !== existingUser.role
+        ? { customPermissions: [], usesCustomPermissions: false }
+        : {}),
     },
     include: {
       organization: true,
@@ -362,6 +417,59 @@ const updateOrganizationUser = async (currentUser, userId, payload) => {
 };
 
 const updateUserRole = async (currentUser, userId, role) => updateOrganizationUser(currentUser, userId, { role });
+
+const getWorkspacePermissionCatalog = (currentUser) => {
+  if (!hasPermission(currentUser, PERMISSIONS.USERS_VIEW)) {
+    throw new ApiError(403, "You do not have permission to view workspace access settings.");
+  }
+
+  return getPermissionCatalog();
+};
+
+const updateUserPermissions = async (currentUser, userId, payload) => {
+  if (![USER_ROLES.SUPER_ADMIN, USER_ROLES.ADMIN].includes(currentUser.role)) {
+    throw new ApiError(403, "Only workspace administrators can customize permissions.");
+  }
+
+  if (!hasPermission(currentUser, PERMISSIONS.PERMISSIONS_MANAGE)) {
+    throw new ApiError(403, "You do not have permission to customize account access.");
+  }
+
+  const existingUser = await getManagedUser(currentUser, userId);
+
+  if (existingUser.role === USER_ROLES.SUPER_ADMIN && currentUser.role !== USER_ROLES.SUPER_ADMIN) {
+    throw new ApiError(403, "Only a super admin can change super admin permissions.");
+  }
+
+  if (existingUser.id === currentUser.id && !payload.useRoleDefaults) {
+    throw new ApiError(400, "Use role defaults for your own account to avoid locking yourself out.");
+  }
+
+  const requestedPermissions = [...new Set(payload.permissions || [])];
+  if (requestedPermissions.some((permission) => !isKnownPermission(permission))) {
+    throw new ApiError(400, "One or more selected permissions are not supported.");
+  }
+
+  const actorPermissions = resolvePermissions(currentUser);
+  if (
+    currentUser.role !== USER_ROLES.SUPER_ADMIN &&
+    requestedPermissions.some((permission) => !actorPermissions.includes(permission))
+  ) {
+    throw new ApiError(403, "You cannot grant a permission that your own account does not have.");
+  }
+
+  const updatedUser = await prisma.user.update({
+    data: payload.useRoleDefaults
+      ? { customPermissions: [], usesCustomPermissions: false }
+      : { customPermissions: requestedPermissions, usesCustomPermissions: true },
+    include: {
+      organization: true,
+    },
+    where: { id: existingUser.id },
+  });
+
+  return serializeUser(updatedUser);
+};
 
 const deleteOrganizationUser = async (currentUser, userId) => {
   const existingUser = await getManagedUser(currentUser, userId);
@@ -395,11 +503,14 @@ module.exports = {
   createOrganizationUser,
   deleteOrganizationUser,
   getCurrentUser,
+  getWorkspacePermissionCatalog,
   getUserById,
   listEmployees,
   listUsers,
   serializeUser,
   syncUserProfile,
+  updateCurrentProfile,
   updateOrganizationUser,
+  updateUserPermissions,
   updateUserRole,
 };

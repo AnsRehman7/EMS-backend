@@ -1,3 +1,5 @@
+const { hasPermission, PERMISSIONS } = require("./permissions");
+
 const USER_ROLES = {
   ADMIN: "ADMIN",
   ACCOUNTS: "ACCOUNTS",
@@ -21,12 +23,16 @@ const normalizeRole = (role) => {
 
 const toClientRole = (role) => String(role || USER_ROLES.EMPLOYEE).toLowerCase();
 
-const canManageBilling = (user) => BILLING_MANAGEMENT_ROLES.includes(user?.role);
-const canManageAttendance = (user) => ATTENDANCE_MANAGEMENT_ROLES.includes(user?.role);
-const canManageUsers = (user) => USER_MANAGEMENT_ROLES.includes(user?.role);
-const canViewOrganizationAttendance = (user) => ATTENDANCE_VIEW_ALL_ROLES.includes(user?.role);
-const canManageWork = (user) => WORK_MANAGEMENT_ROLES.includes(user?.role);
-const canViewOrganizationWork = (user) => ORGANIZATION_WORK_VIEW_ROLES.includes(user?.role);
+const canManageBilling = (user) => hasPermission(user, PERMISSIONS.BILLING_MANAGE);
+const canManageAttendance = (user) => hasPermission(user, PERMISSIONS.ATTENDANCE_MANAGE);
+const canManageUsers = (user) => hasPermission(user, PERMISSIONS.USERS_MANAGE);
+const canViewOrganizationAttendance = (user) => hasPermission(user, PERMISSIONS.ATTENDANCE_VIEW_ALL);
+const canManageWork = (user) =>
+  [PERMISSIONS.TASKS_CREATE, PERMISSIONS.TASKS_EDIT, PERMISSIONS.PROJECTS_CREATE, PERMISSIONS.PROJECTS_EDIT].some(
+    (permission) => hasPermission(user, permission),
+  );
+const canViewOrganizationWork = (user) =>
+  hasPermission(user, PERMISSIONS.TASKS_VIEW_ALL) || hasPermission(user, PERMISSIONS.PROJECTS_VIEW_ALL);
 const isPrivileged = canManageWork;
 
 const canAssignRole = (actor, targetRole) => {

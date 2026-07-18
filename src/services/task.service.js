@@ -1,7 +1,8 @@
 const prisma = require("../db/prisma");
 const ApiError = require("../utils/apiError");
-const { canManageWork, canViewOrganizationWork } = require("../utils/roles");
+const { hasPermission, PERMISSIONS } = require("../utils/permissions");
 const { analyzeTaskProgress, refreshProjectWeights, updateProjectProgress } = require("./analysis.service");
+const { notifyTaskActivity, safelyNotify } = require("./notification.service");
 
 const normalizePriority = (priority = "normal") => String(priority).trim().toUpperCase();
 const normalizeStatus = (status = "open") => {
@@ -82,7 +83,7 @@ const listTasks = async (currentUser) => {
   const tasks = await prisma.task.findMany({
     include: taskInclude,
     orderBy: [{ status: "asc" }, { createdAt: "desc" }],
-    where: canViewOrganizationWork(currentUser)
+    where: hasPermission(currentUser, PERMISSIONS.TASKS_VIEW_ALL)
       ? organizationWhere
       : { ...organizationWhere, assignedToId: currentUser.id },
   });
@@ -91,7 +92,7 @@ const listTasks = async (currentUser) => {
 };
 
 const createTask = async (currentUser, payload) => {
-  if (!canManageWork(currentUser)) {
+  if (!hasPermission(currentUser, PERMISSIONS.TASKS_CREATE)) {
     throw new ApiError(403, "You do not have permission to assign tasks.");
   }
 
@@ -147,6 +148,10 @@ const createTask = async (currentUser, payload) => {
     where: { id: task.id },
   });
 
+  await safelyNotify(() =>
+    notifyTaskActivity({ actor: currentUser, event: "created", previousAssigneeId: null, task: analyzedTask }),
+  );
+
   return serializeTask(analyzedTask);
 };
 
@@ -163,7 +168,7 @@ const getTaskForAction = async (taskId, currentUser) => {
     throw new ApiError(404, "Task not found.");
   }
 
-  if (!canManageWork(currentUser) && task.assignedToId !== currentUser.id) {
+  if (!hasPermission(currentUser, PERMISSIONS.TASKS_EDIT) && task.assignedToId !== currentUser.id) {
     throw new ApiError(403, "You can only update tasks assigned to you.");
   }
 
@@ -183,7 +188,7 @@ const getTaskById = async (taskId, currentUser) => {
     throw new ApiError(404, "Task not found.");
   }
 
-  if (!canViewOrganizationWork(currentUser) && task.assignedToId !== currentUser.id) {
+  if (!hasPermission(currentUser, PERMISSIONS.TASKS_VIEW_ALL) && task.assignedToId !== currentUser.id) {
     throw new ApiError(403, "You can only view tasks assigned to you.");
   }
 
@@ -191,7 +196,7 @@ const getTaskById = async (taskId, currentUser) => {
 };
 
 const updateTask = async (taskId, currentUser, payload) => {
-  if (!canManageWork(currentUser)) {
+  if (!hasPermission(currentUser, PERMISSIONS.TASKS_EDIT)) {
     throw new ApiError(403, "You do not have permission to edit tasks.");
   }
 
@@ -256,6 +261,14 @@ const updateTask = async (taskId, currentUser, payload) => {
   }
 
   const updatedTask = await prisma.task.findUnique({ include: taskInclude, where: { id: taskId } });
+  await safelyNotify(() =>
+    notifyTaskActivity({
+      actor: currentUser,
+      event: "updated",
+      previousAssigneeId: existingTask.assignedToId,
+      task: updatedTask,
+    }),
+  );
   return serializeTask(updatedTask);
 };
 
@@ -276,11 +289,20 @@ const updateTaskStatus = async (taskId, status, currentUser) => {
 
   await updateProjectProgress(task.projectId, currentUser.organizationId);
 
+  await safelyNotify(() =>
+    notifyTaskActivity({
+      actor: currentUser,
+      event: "updated",
+      previousAssigneeId: existingTask.assignedToId,
+      task,
+    }),
+  );
+
   return serializeTask(task);
 };
 
 const createTimeLog = async (taskId, currentUser, payload) => {
-  await getTaskForAction(taskId, currentUser);
+  const task = await getTaskForAction(taskId, currentUser);
 
   const timeLog = await prisma.timeLog.create({
     data: {
@@ -309,22 +331,39 @@ const createTimeLog = async (taskId, currentUser, payload) => {
     where: { id: timeLog.id },
   });
 
+  await safelyNotify(() =>
+    notifyTaskActivity({
+      actor: currentUser,
+      event: "time_logged",
+      previousAssigneeId: task.assignedToId,
+      task,
+    }),
+  );
+
   return serializeTimeLog(analyzedTimeLog);
 };
 
 const deleteTask = async (taskId, currentUser) => {
-  if (!canManageWork(currentUser)) {
+  if (!hasPermission(currentUser, PERMISSIONS.TASKS_DELETE)) {
     throw new ApiError(403, "You do not have permission to delete tasks.");
   }
 
   const task = await getTaskForAction(taskId, currentUser);
   await prisma.task.delete({ where: { id: taskId } });
   await refreshProjectWeights(task.projectId, currentUser.organizationId);
+  await safelyNotify(() =>
+    notifyTaskActivity({
+      actor: currentUser,
+      event: "deleted",
+      previousAssigneeId: task.assignedToId,
+      task: { ...task, assignedToId: null },
+    }),
+  );
 };
 
 const getTaskStats = async (currentUser) => {
   const organizationWhere = { organizationId: currentUser.organizationId };
-  const where = canViewOrganizationWork(currentUser)
+  const where = hasPermission(currentUser, PERMISSIONS.TASKS_VIEW_ALL)
     ? organizationWhere
     : { ...organizationWhere, assignedToId: currentUser.id };
   const [total, completed, active] = await Promise.all([
