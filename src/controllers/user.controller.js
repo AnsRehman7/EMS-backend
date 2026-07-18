@@ -17,6 +17,11 @@ const listUsers = asyncHandler(async (req, res) => {
   res.status(200).json({ data: { users } });
 });
 
+const getUserById = asyncHandler(async (req, res) => {
+  const user = await userService.getUserById(req.user, req.params.userId);
+  res.status(200).json({ data: { user } });
+});
+
 const createUser = asyncHandler(async (req, res) => {
   const payload = parseBody(createOrganizationUserSchema, req.body);
   const user = await userService.createOrganizationUser(req.user, payload);
@@ -46,6 +51,7 @@ const deleteUser = asyncHandler(async (req, res) => {
 module.exports = {
   createUser,
   deleteUser,
+  getUserById,
   listEmployees,
   listUsers,
   updateUser,

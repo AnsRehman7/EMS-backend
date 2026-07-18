@@ -295,6 +295,8 @@ const getManagedUser = async (currentUser, userId) => {
   return user;
 };
 
+const getUserById = async (currentUser, userId) => serializeUser(await getManagedUser(currentUser, userId));
+
 const updateOrganizationUser = async (currentUser, userId, payload) => {
   const existingUser = await getManagedUser(currentUser, userId);
   const nextRole = payload.role ? normalizeRole(payload.role) : existingUser.role;
@@ -393,6 +395,7 @@ module.exports = {
   createOrganizationUser,
   deleteOrganizationUser,
   getCurrentUser,
+  getUserById,
   listEmployees,
   listUsers,
   serializeUser,

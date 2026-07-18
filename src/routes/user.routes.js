@@ -14,6 +14,11 @@ router.get(
   userController.listEmployees
 );
 router.get("/", requireRoles(USER_ROLES.SUPER_ADMIN, USER_ROLES.ADMIN, USER_ROLES.HR), userController.listUsers);
+router.get(
+  "/:userId",
+  requireRoles(USER_ROLES.SUPER_ADMIN, USER_ROLES.ADMIN, USER_ROLES.HR),
+  userController.getUserById
+);
 router.post("/", requireRoles(USER_ROLES.SUPER_ADMIN, USER_ROLES.ADMIN, USER_ROLES.HR), userController.createUser);
 router.patch("/:userId", requireRoles(USER_ROLES.SUPER_ADMIN, USER_ROLES.ADMIN, USER_ROLES.HR), userController.updateUser);
 router.patch(
