@@ -1,6 +1,6 @@
 const { z } = require("zod");
 const ApiError = require("../utils/apiError");
-const { generateJson, isGeminiConfigured } = require("./gemini.service");
+const { generateJson, isGroqConfigured } = require("./groq.service");
 
 const MAX_TASKS = 24;
 const DAY_MS = 86_400_000;
@@ -78,7 +78,7 @@ const normalizeTaskPlan = (rawPlan, { dueDate, startDate }) => {
   });
 
   if (!uniqueTasks.length) {
-    throw new ApiError(502, "Gemini returned no usable tasks for this project.");
+    throw new ApiError(502, "Groq returned no usable tasks for this project.");
   }
 
   const tasks = uniqueTasks.map((task, index) => {
@@ -102,7 +102,7 @@ const normalizeTaskPlan = (rawPlan, { dueDate, startDate }) => {
   });
 
   return {
-    summary: plan.summary || `Gemini created ${tasks.length} unassigned tasks from the project requirements.`,
+    summary: plan.summary || `Groq created ${tasks.length} unassigned tasks from the project requirements.`,
     tasks: normalizeWeights(tasks),
   };
 };
@@ -151,8 +151,8 @@ ${JSON.stringify({ description, dueDate: planningEnd, name, startDate: planningS
 };
 
 const generateProjectTaskPlan = async (project) => {
-  if (!isGeminiConfigured()) {
-    throw new ApiError(503, "Gemini is not configured. Add GEMINI_API_KEY before using AI task planning.");
+  if (!isGroqConfigured()) {
+    throw new ApiError(503, "Groq is not configured. Add GROQ_API_KEY before using AI task planning.");
   }
 
   try {
@@ -160,7 +160,7 @@ const generateProjectTaskPlan = async (project) => {
     return normalizeTaskPlan(rawPlan, project);
   } catch (error) {
     if (error instanceof ApiError && [400, 503].includes(error.statusCode)) throw error;
-    throw new ApiError(502, "Gemini could not produce a valid task plan. Review the requirements and try again.");
+    throw new ApiError(502, "Groq could not produce a valid task plan. Review the requirements and try again.");
   }
 };
 

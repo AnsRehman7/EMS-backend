@@ -1,5 +1,5 @@
 const prisma = require("../db/prisma");
-const { generateJson, isGeminiConfigured } = require("./gemini.service");
+const { generateJson, isGroqConfigured } = require("./groq.service");
 
 const clamp = (value, min = 0, max = 100) => Math.min(max, Math.max(min, Number(value) || 0));
 const toNumber = (value) => (value === null || value === undefined ? 0 : Number(value));
@@ -214,15 +214,15 @@ const refreshProjectWeights = async (projectId, organizationId) => {
   if (!project || project.tasks.length === 0) return null;
 
   let weights = equalWeights(project.tasks);
-  let summary = "Equal weight fallback was used because Gemini is not configured.";
+  let summary = "Equal weight fallback was used because Groq is not configured.";
 
-  if (isGeminiConfigured()) {
+  if (isGroqConfigured()) {
     try {
       const result = await generateJson(buildWeightPrompt(project, project.tasks));
       weights = normalizeWeights(project.tasks, result.tasks || []);
-      summary = result.summary || "Gemini analyzed task weightage for this project.";
+      summary = result.summary || "Groq analyzed task weightage for this project.";
     } catch (error) {
-      console.warn("Gemini project weight analysis failed:", error.message);
+      console.warn("Groq project weight analysis failed:", error.message);
       summary = "Equal weight fallback was used because AI analysis failed.";
     }
   }
@@ -259,15 +259,15 @@ const analyzeTaskProgress = async ({ latestComment = "", organizationId, taskId,
   if (!task) return null;
 
   let progress = fallbackProgress(task, latestComment);
-  let summary = "Deterministic progress fallback was used because Gemini is not configured.";
+  let summary = "Deterministic progress fallback was used because Groq is not configured.";
 
-  if (isGeminiConfigured()) {
+  if (isGroqConfigured()) {
     try {
       const result = await generateJson(buildProgressPrompt(task, latestComment));
       progress = clamp(result.progress);
-      summary = result.summary || "Gemini analyzed task progress from the latest work log.";
+      summary = result.summary || "Groq analyzed task progress from the latest work log.";
     } catch (error) {
-      console.warn("Gemini task progress analysis failed:", error.message);
+      console.warn("Groq task progress analysis failed:", error.message);
       summary = "Deterministic progress fallback was used because AI analysis failed.";
     }
   }

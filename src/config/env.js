@@ -45,8 +45,8 @@ const env = {
     process.env.FIREBASE_WEB_API_KEY ||
     process.env.VITE_FIREBASE_API_KEY ||
     readFrontendEnvValue("VITE_FIREBASE_API_KEY"),
-  geminiApiKey: process.env.GEMINI_API_KEY,
-  geminiModel: process.env.GEMINI_MODEL || "gemini-3.5-flash",
+  groqApiKey: process.env.GROQ_API_KEY,
+  groqModel: process.env.GROQ_MODEL || "llama-3.3-70b-versatile",
   nodeEnv: process.env.NODE_ENV || "development",
   officeLatitude: toNumber(process.env.OFFICE_LATITUDE),
   officeLongitude: toNumber(process.env.OFFICE_LONGITUDE),

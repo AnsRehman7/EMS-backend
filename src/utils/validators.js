@@ -124,7 +124,7 @@ const createProjectSchema = z
     if (!project.dueDate) {
       context.addIssue({
         code: "custom",
-        message: "Set a project due date so Gemini can schedule the generated tasks.",
+        message: "Set a project due date so Groq can schedule the generated tasks.",
         path: ["dueDate"],
       });
     }
