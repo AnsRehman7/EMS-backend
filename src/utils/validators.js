@@ -74,6 +74,7 @@ const taskStatusValues = [
 const projectPriorityValues = ["low", "normal", "high", "critical", "LOW", "NORMAL", "HIGH", "CRITICAL"];
 const permissionKeySchema = z.string().trim().min(1).max(80);
 const projectTagsSchema = z.array(z.string().trim().min(1).max(40)).max(12);
+const workspaceDepartmentsSchema = z.array(z.string().trim().min(1).max(80)).max(40);
 
 const syncProfileSchema = z.object({
   contact: optionalTrimmedString(40),
@@ -220,6 +221,25 @@ const updateUserPermissionsSchema = z.object({
   useRoleDefaults: z.boolean().default(false),
 });
 
+const updateWorkspaceSettingsSchema = z
+  .object({
+    departments: workspaceDepartmentsSchema.optional(),
+    name: z.string().trim().min(2, "Workspace name must contain at least 2 characters.").max(160).optional(),
+    timezone: z.string().trim().min(1).max(80).optional(),
+    weekStartsOn: z.coerce.number().int().min(0).max(6).optional(),
+    workdayEnd: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Use HH:mm for the workday end.").optional(),
+    workdayStart: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Use HH:mm for the workday start.").optional(),
+  })
+  .superRefine((settings, context) => {
+    if (settings.workdayStart && settings.workdayEnd && settings.workdayStart >= settings.workdayEnd) {
+      context.addIssue({
+        code: "custom",
+        message: "Workday end must be later than workday start.",
+        path: ["workdayEnd"],
+      });
+    }
+  });
+
 const parseBody = (schema, body) => schema.parse(body || {});
 
 module.exports = {
@@ -237,4 +257,5 @@ module.exports = {
   updateTaskStatusSchema,
   updateUserRoleSchema,
   updateUserPermissionsSchema,
+  updateWorkspaceSettingsSchema,
 };

@@ -4,6 +4,7 @@ const { hasPermission, PERMISSIONS } = require("../utils/permissions");
 const { calculateWeightedProjectProgress } = require("./analysis.service");
 const { generateProjectTaskPlan } = require("./projectPlanning.service");
 const { notifyProjectActivity, safelyNotify } = require("./notification.service");
+const { safelyRecordAudit } = require("./audit.service");
 const { serializeTask, taskInclude } = require("./task.service");
 
 const normalizeProjectStatus = (status = "active") => String(status).trim().toUpperCase();
@@ -282,7 +283,17 @@ const createProject = async (currentUser, payload) => {
     });
   });
 
-  await safelyNotify(() => notifyProjectActivity({ actor: currentUser, event: "created", project }));
+  await safelyNotify(() =>
+    notifyProjectActivity({ actor: currentUser, event: "created", previousProject: null, project }),
+  );
+  await safelyRecordAudit({
+    action: "CREATED",
+    actor: currentUser,
+    entityId: project.id,
+    entityType: "PROJECT",
+    metadata: { generatedTaskCount: taskPlan?.tasks.length || 0, ownerId: project.ownerId },
+    summary: `Created project: ${project.name}`,
+  });
 
   return serializeProject(project);
 };
@@ -345,7 +356,17 @@ const updateProject = async (projectId, currentUser, payload) => {
     where: { id: projectId },
   });
 
-  await safelyNotify(() => notifyProjectActivity({ actor: currentUser, event: "updated", project }));
+  await safelyNotify(() =>
+    notifyProjectActivity({ actor: currentUser, event: "updated", previousProject: existingProject, project }),
+  );
+  await safelyRecordAudit({
+    action: project.status === "COMPLETED" && existingProject.status !== "COMPLETED" ? "COMPLETED" : "UPDATED",
+    actor: currentUser,
+    entityId: project.id,
+    entityType: "PROJECT",
+    metadata: { fields: Object.keys(data), previousStatus: String(existingProject.status).toLowerCase() },
+    summary: `Updated project: ${project.name}`,
+  });
 
   return serializeProject(project);
 };
@@ -387,13 +408,32 @@ const deleteProject = async (projectId, currentUser) => {
       where: { id: projectId },
     });
 
-    await safelyNotify(() => notifyProjectActivity({ actor: currentUser, event: "archived", project }));
+    await safelyNotify(() =>
+      notifyProjectActivity({ actor: currentUser, event: "archived", previousProject: existingProject, project }),
+    );
+    await safelyRecordAudit({
+      action: "ARCHIVED",
+      actor: currentUser,
+      entityId: project.id,
+      entityType: "PROJECT",
+      metadata: { taskCount },
+      summary: `Archived project: ${project.name}`,
+    });
 
     return { archived: true, project: serializeProject(project) };
   }
 
   await prisma.project.delete({ where: { id: projectId } });
-  await safelyNotify(() => notifyProjectActivity({ actor: currentUser, event: "deleted", project: existingProject }));
+  await safelyNotify(() =>
+    notifyProjectActivity({ actor: currentUser, event: "deleted", previousProject: existingProject, project: existingProject }),
+  );
+  await safelyRecordAudit({
+    action: "DELETED",
+    actor: currentUser,
+    entityId: existingProject.id,
+    entityType: "PROJECT",
+    summary: `Deleted project: ${existingProject.name}`,
+  });
   return { deleted: true };
 };
 

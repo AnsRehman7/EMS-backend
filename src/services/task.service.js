@@ -3,6 +3,7 @@ const ApiError = require("../utils/apiError");
 const { hasPermission, PERMISSIONS } = require("../utils/permissions");
 const { analyzeTaskProgress, refreshProjectWeights, updateProjectProgress } = require("./analysis.service");
 const { notifyTaskActivity, safelyNotify } = require("./notification.service");
+const { safelyRecordAudit } = require("./audit.service");
 
 const normalizePriority = (priority = "normal") => String(priority).trim().toUpperCase();
 const normalizeStatus = (status = "open") => {
@@ -149,8 +150,16 @@ const createTask = async (currentUser, payload) => {
   });
 
   await safelyNotify(() =>
-    notifyTaskActivity({ actor: currentUser, event: "created", previousAssigneeId: null, task: analyzedTask }),
+    notifyTaskActivity({ actor: currentUser, event: "created", previousTask: null, task: analyzedTask }),
   );
+  await safelyRecordAudit({
+    action: "CREATED",
+    actor: currentUser,
+    entityId: analyzedTask.id,
+    entityType: "TASK",
+    metadata: { assigneeId: analyzedTask.assignedToId, projectId: analyzedTask.projectId },
+    summary: `Created task: ${analyzedTask.title}`,
+  });
 
   return serializeTask(analyzedTask);
 };
@@ -247,7 +256,7 @@ const updateTask = async (taskId, currentUser, payload) => {
     data.status = status;
     data.aiAnalyzedAt = new Date();
     data.aiProgress = status === "COMPLETED" ? 100 : Math.min(existingTask.aiProgress || 0, 95);
-    data.completedAt = status === "COMPLETED" ? new Date() : null;
+    data.completedAt = status === "COMPLETED" ? existingTask.completedAt || new Date() : null;
   }
 
   await prisma.task.update({ data, where: { id: taskId } });
@@ -265,10 +274,18 @@ const updateTask = async (taskId, currentUser, payload) => {
     notifyTaskActivity({
       actor: currentUser,
       event: "updated",
-      previousAssigneeId: existingTask.assignedToId,
+      previousTask: existingTask,
       task: updatedTask,
     }),
   );
+  await safelyRecordAudit({
+    action: "UPDATED",
+    actor: currentUser,
+    entityId: updatedTask.id,
+    entityType: "TASK",
+    metadata: { fields: Object.keys(data), previousAssigneeId: existingTask.assignedToId },
+    summary: `Updated task: ${updatedTask.title}`,
+  });
   return serializeTask(updatedTask);
 };
 
@@ -280,7 +297,7 @@ const updateTaskStatus = async (taskId, status, currentUser) => {
     data: {
       aiAnalyzedAt: new Date(),
       aiProgress: normalizedStatus === "COMPLETED" ? 100 : Math.min(existingTask.aiProgress || 0, 95),
-      completedAt: normalizedStatus === "COMPLETED" ? new Date() : null,
+      completedAt: normalizedStatus === "COMPLETED" ? existingTask.completedAt || new Date() : null,
       status: normalizedStatus,
     },
     include: taskInclude,
@@ -293,10 +310,19 @@ const updateTaskStatus = async (taskId, status, currentUser) => {
     notifyTaskActivity({
       actor: currentUser,
       event: "updated",
-      previousAssigneeId: existingTask.assignedToId,
+      previousTask: existingTask,
       task,
     }),
   );
+
+  await safelyRecordAudit({
+    action: normalizedStatus === "COMPLETED" ? "COMPLETED" : "STATUS_CHANGED",
+    actor: currentUser,
+    entityId: task.id,
+    entityType: "TASK",
+    metadata: { from: String(existingTask.status).toLowerCase(), to: String(task.status).toLowerCase() },
+    summary: `Moved ${task.title} to ${String(task.status).toLowerCase().replace("_", " ")}`,
+  });
 
   return serializeTask(task);
 };
@@ -335,10 +361,19 @@ const createTimeLog = async (taskId, currentUser, payload) => {
     notifyTaskActivity({
       actor: currentUser,
       event: "time_logged",
-      previousAssigneeId: task.assignedToId,
+      previousTask: task,
       task,
     }),
   );
+
+  await safelyRecordAudit({
+    action: "TIME_LOGGED",
+    actor: currentUser,
+    entityId: task.id,
+    entityType: "TASK",
+    metadata: { hours: Number(timeLog.hours), timeLogId: timeLog.id },
+    summary: `Logged ${Number(timeLog.hours)}h on ${task.title}`,
+  });
 
   return serializeTimeLog(analyzedTimeLog);
 };
@@ -355,10 +390,18 @@ const deleteTask = async (taskId, currentUser) => {
     notifyTaskActivity({
       actor: currentUser,
       event: "deleted",
-      previousAssigneeId: task.assignedToId,
+      previousTask: task,
       task: { ...task, assignedToId: null },
     }),
   );
+  await safelyRecordAudit({
+    action: "DELETED",
+    actor: currentUser,
+    entityId: task.id,
+    entityType: "TASK",
+    metadata: { projectId: task.projectId },
+    summary: `Deleted task: ${task.title}`,
+  });
 };
 
 const getTaskStats = async (currentUser) => {

@@ -2,12 +2,15 @@ const PERMISSIONS = Object.freeze({
   ATTENDANCE_MANAGE: "attendance.manage",
   ATTENDANCE_VIEW_ALL: "attendance.view_all",
   BILLING_MANAGE: "billing.manage",
+  AUDIT_VIEW: "audit.view",
   DASHBOARD_VIEW: "dashboard.view",
   PERMISSIONS_MANAGE: "permissions.manage",
   PROJECTS_CREATE: "projects.create",
   PROJECTS_DELETE: "projects.delete",
   PROJECTS_EDIT: "projects.edit",
   PROJECTS_VIEW_ALL: "projects.view_all",
+  REPORTS_VIEW: "reports.view",
+  SETTINGS_MANAGE: "settings.manage",
   TASKS_CREATE: "tasks.create",
   TASKS_DELETE: "tasks.delete",
   TASKS_EDIT: "tasks.edit",
@@ -22,6 +25,12 @@ const PERMISSION_CATALOG = Object.freeze([
     group: "Workspace",
     key: PERMISSIONS.DASHBOARD_VIEW,
     label: "View executive dashboard",
+  },
+  {
+    description: "Review workforce, delivery, attendance, and capacity reports.",
+    group: "Workspace",
+    key: PERMISSIONS.REPORTS_VIEW,
+    label: "View organization reports",
   },
   {
     description: "View every task in the workspace instead of assigned tasks only.",
@@ -102,6 +111,18 @@ const PERMISSION_CATALOG = Object.freeze([
     label: "Manage permissions",
   },
   {
+    description: "Update workspace identity, departments, timezone, and work schedule.",
+    group: "Administration",
+    key: PERMISSIONS.SETTINGS_MANAGE,
+    label: "Manage workspace settings",
+  },
+  {
+    description: "Review the immutable history of important workspace changes.",
+    group: "Administration",
+    key: PERMISSIONS.AUDIT_VIEW,
+    label: "View audit log",
+  },
+  {
     description: "Manage subscription and billing settings.",
     group: "Administration",
     key: PERMISSIONS.BILLING_MANAGE,
@@ -116,6 +137,7 @@ const ROLE_PERMISSIONS = Object.freeze({
   ADMIN: allPermissions.filter((permission) => permission !== PERMISSIONS.BILLING_MANAGE),
   MANAGER: [
     PERMISSIONS.DASHBOARD_VIEW,
+    PERMISSIONS.REPORTS_VIEW,
     PERMISSIONS.TASKS_VIEW_ALL,
     PERMISSIONS.TASKS_CREATE,
     PERMISSIONS.TASKS_EDIT,
@@ -127,6 +149,7 @@ const ROLE_PERMISSIONS = Object.freeze({
   ],
   HR: [
     PERMISSIONS.DASHBOARD_VIEW,
+    PERMISSIONS.REPORTS_VIEW,
     PERMISSIONS.TASKS_VIEW_ALL,
     PERMISSIONS.TASKS_CREATE,
     PERMISSIONS.TASKS_EDIT,
@@ -139,6 +162,7 @@ const ROLE_PERMISSIONS = Object.freeze({
     PERMISSIONS.USERS_MANAGE,
   ],
   ACCOUNTS: [
+    PERMISSIONS.REPORTS_VIEW,
     PERMISSIONS.TASKS_VIEW_ALL,
     PERMISSIONS.PROJECTS_VIEW_ALL,
     PERMISSIONS.ATTENDANCE_VIEW_ALL,

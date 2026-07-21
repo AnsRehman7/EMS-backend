@@ -1,3 +1,4 @@
+const fs = require("fs");
 const axios = require("axios");
 const { applicationDefault, cert, getApps, initializeApp } = require("firebase-admin/app");
 const { getAuth } = require("firebase-admin/auth");
@@ -6,15 +7,62 @@ const { env } = require("./env");
 
 const firebaseRestUrl = "https://identitytoolkit.googleapis.com/v1";
 
-const hasServiceAccountJson = Boolean(env.firebaseServiceAccountJson);
+const normalizeServiceAccount = (serviceAccount) => {
+  if (!serviceAccount || typeof serviceAccount !== "object") return null;
+
+  const projectId = serviceAccount.project_id || serviceAccount.projectId;
+  const clientEmail = serviceAccount.client_email || serviceAccount.clientEmail;
+  const privateKey = (serviceAccount.private_key || serviceAccount.privateKey || "").replace(/\\n/g, "\n");
+
+  if (!projectId || !clientEmail || !privateKey) {
+    throw new Error("Firebase service account must include project_id, client_email, and private_key.");
+  }
+
+  return { clientEmail, privateKey, projectId };
+};
+
+const parseServiceAccount = () => {
+  let rawValue = env.firebaseServiceAccountJson;
+
+  if (!rawValue && env.firebaseServiceAccountBase64) {
+    rawValue = Buffer.from(env.firebaseServiceAccountBase64.trim(), "base64").toString("utf8");
+  }
+
+  if (!rawValue) return null;
+
+  const trimmedValue = rawValue.trim();
+  const jsonValue =
+    trimmedValue.startsWith("'") && trimmedValue.endsWith("'")
+      ? trimmedValue.slice(1, -1)
+      : trimmedValue;
+  let parsed = JSON.parse(jsonValue);
+  if (typeof parsed === "string") parsed = JSON.parse(parsed);
+  return normalizeServiceAccount(parsed);
+};
+
+let serviceAccount = null;
+try {
+  serviceAccount = parseServiceAccount();
+} catch (error) {
+  console.error(`[firebase] Ignoring invalid service account configuration: ${error.message}`);
+}
+
+const hasServiceAccountJson = Boolean(serviceAccount);
 const hasSplitServiceAccount = Boolean(env.firebaseProjectId && env.firebaseClientEmail && env.firebasePrivateKey);
-const hasApplicationDefaultCredentials = Boolean(process.env.GOOGLE_APPLICATION_CREDENTIALS);
+const applicationCredentialsPath = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+const hasApplicationDefaultCredentials = Boolean(
+  applicationCredentialsPath && fs.existsSync(applicationCredentialsPath),
+);
 const hasAdminCredential = hasServiceAccountJson || hasSplitServiceAccount || hasApplicationDefaultCredentials;
 const hasRestFallback = Boolean(env.firebaseProjectId && env.firebaseWebApiKey);
 
+if (applicationCredentialsPath && !hasApplicationDefaultCredentials) {
+  console.warn("[firebase] GOOGLE_APPLICATION_CREDENTIALS does not point to a readable file; ignoring it.");
+}
+
 const getCredential = () => {
-  if (env.firebaseServiceAccountJson) {
-    return cert(JSON.parse(env.firebaseServiceAccountJson));
+  if (serviceAccount) {
+    return cert(serviceAccount);
   }
 
   if (hasSplitServiceAccount) {
@@ -37,15 +85,21 @@ const getAdminAuth = () => {
 
   const options = { credential: getCredential() };
 
-  if (env.firebaseProjectId) {
-    options.projectId = env.firebaseProjectId;
+  const projectId = serviceAccount?.projectId || env.firebaseProjectId;
+  if (projectId) {
+    options.projectId = projectId;
   }
 
   const app = getApps()[0] || initializeApp(options);
   return getAuth(app);
 };
 
-const adminAuth = getAdminAuth();
+let adminAuth = null;
+try {
+  adminAuth = getAdminAuth();
+} catch (error) {
+  console.error(`[firebase] Unable to initialize Firebase Admin; using the REST fallback: ${error.message}`);
+}
 
 const mapRestAuthError = (code = "") => {
   const normalizedCode = String(code).split(":")[0].trim();
@@ -177,5 +231,6 @@ const restAuth = {
 
 module.exports = {
   firebaseAuth: adminAuth || restAuth,
-  firebaseAuthMode: adminAuth ? "admin" : "rest",
+  firebaseAuthMode: adminAuth ? "admin" : hasRestFallback ? "rest" : "unconfigured",
+  firebaseAuthReady: Boolean(adminAuth || hasRestFallback),
 };

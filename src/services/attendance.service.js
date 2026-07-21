@@ -2,6 +2,7 @@ const prisma = require("../db/prisma");
 const { env } = require("../config/env");
 const ApiError = require("../utils/apiError");
 const { canManageAttendance, canViewOrganizationAttendance } = require("../utils/roles");
+const { safelyRecordAudit } = require("./audit.service");
 
 const toNumber = (value) => (value === null || value === undefined ? null : Number(value));
 const normalizeDirection = (direction) => String(direction || "").trim().toUpperCase();
@@ -161,6 +162,15 @@ const createScan = async (currentUser, payload) => {
     include: {
       user: true,
     },
+  });
+
+  await safelyRecordAudit({
+    action: accepted ? "RECORDED" : "REJECTED",
+    actor: currentUser,
+    entityId: scan.id,
+    entityType: "ATTENDANCE",
+    metadata: { direction: String(scan.direction).toLowerCase(), source, userId: scanUser.id },
+    summary: `${accepted ? "Recorded" : "Rejected"} ${String(scan.direction).toLowerCase()} attendance for ${scanUser.fullName}`,
   });
 
   return serializeScan(scan);

@@ -3,6 +3,7 @@ const ApiError = require("../utils/apiError");
 const { firebaseAuth } = require("../config/firebaseAdmin");
 const {
   getPermissionCatalog,
+  getRolePermissions,
   hasPermission,
   isKnownPermission,
   PERMISSIONS,
@@ -18,6 +19,7 @@ const {
   toClientRole,
   USER_ROLES,
 } = require("../utils/roles");
+const { safelyRecordAudit } = require("./audit.service");
 
 const normalizeEmail = (email = "") => email.trim().toLowerCase();
 const normalizeStatus = (status = "active") => String(status || "active").trim().toUpperCase();
@@ -27,6 +29,7 @@ const serializeUser = (user) => {
 
   return {
   contact: user.contact || "",
+  createdAt: user.createdAt,
   department: user.department || "",
   designation: user.designation || "",
   email: user.email,
@@ -39,7 +42,11 @@ const serializeUser = (user) => {
         plan: String(user.organization.plan).toLowerCase(),
         slug: user.organization.slug,
         status: String(user.organization.status).toLowerCase(),
+        timezone: user.organization.timezone,
         trialEndsAt: user.organization.trialEndsAt,
+        weekStartsOn: user.organization.weekStartsOn,
+        workdayEnd: user.organization.workdayEnd,
+        workdayStart: user.organization.workdayStart,
       }
     : null,
   organizationId: user.organizationId,
@@ -53,16 +60,20 @@ const serializeUser = (user) => {
     canEditTasks: hasPermission(user, PERMISSIONS.TASKS_EDIT),
     canManageBilling: canManageBilling(user),
     canManagePermissions: hasPermission(user, PERMISSIONS.PERMISSIONS_MANAGE),
+    canManageSettings: hasPermission(user, PERMISSIONS.SETTINGS_MANAGE),
     canManageUsers: canManageUsers(user),
     canManageWork: canManageWork(user),
     canViewUsers: hasPermission(user, PERMISSIONS.USERS_VIEW),
     canViewDashboard: hasPermission(user, PERMISSIONS.DASHBOARD_VIEW),
+    canViewAudit: hasPermission(user, PERMISSIONS.AUDIT_VIEW),
+    canViewReports: hasPermission(user, PERMISSIONS.REPORTS_VIEW),
     canViewOrganizationWork: canViewOrganizationWork(user),
     usesRoleDefaults: !user.usesCustomPermissions,
   },
   role: toClientRole(user.role),
   status: String(user.status || "ACTIVE").toLowerCase(),
   uid: user.firebaseUid,
+  updatedAt: user.updatedAt,
   };
 };
 
@@ -130,26 +141,31 @@ const syncUserProfile = async (firebaseUser, payload = {}) => {
     throw new ApiError(400, "Firebase account must have an email address.");
   }
 
-  const existingUser = await prisma.user.findFirst({
-    include: {
-      organization: true,
-    },
-    where: {
-      OR: [{ firebaseUid }, { email }],
-    },
-  });
+  const [userByUid, userByEmail] = await Promise.all([
+    prisma.user.findUnique({ include: { organization: true }, where: { firebaseUid } }),
+    prisma.user.findUnique({ include: { organization: true }, where: { email } }),
+  ]);
+
+  if (userByUid && userByEmail && userByUid.id !== userByEmail.id) {
+    throw new ApiError(409, "This Firebase identity conflicts with another workspace account. Contact an administrator.");
+  }
+
+  const existingUser = userByUid || userByEmail;
 
   if (existingUser) {
     if (existingUser.firebaseUid !== firebaseUid && !firebaseUser.email_verified) {
       throw new ApiError(403, "Verify this email with Google before connecting it to a workspace account.");
     }
 
+    const synchronizedEmail =
+      existingUser.email === email || firebaseUser.email_verified ? email : existingUser.email;
+
     const updatedUser = await prisma.user.update({
       data: {
         contact: payload.contact ?? existingUser.contact,
         department: payload.department ?? existingUser.department,
         designation: payload.designation ?? existingUser.designation,
-        email,
+        email: synchronizedEmail,
         firebaseUid,
         fullName: payload.fullName || existingUser.fullName,
       },
@@ -201,6 +217,15 @@ const syncUserProfile = async (firebaseUser, payload = {}) => {
     console.warn("Unable to set Firebase claims for trial owner:", error.message);
   });
 
+  await safelyRecordAudit({
+    action: "CREATED",
+    actor: createdUser,
+    entityId: createdUser.organizationId,
+    entityType: "WORKSPACE",
+    metadata: { plan: "free_trial" },
+    summary: `Created workspace: ${createdUser.organization.name}`,
+  });
+
   return serializeUser(createdUser);
 };
 
@@ -225,6 +250,15 @@ const updateCurrentProfile = async (currentUser, payload) => {
       console.warn("Unable to update Firebase display name:", error.message);
     });
   }
+
+  await safelyRecordAudit({
+    action: "UPDATED",
+    actor: currentUser,
+    entityId: updatedUser.id,
+    entityType: "USER",
+    metadata: { fields: Object.keys(payload) },
+    summary: `${updatedUser.fullName} updated their profile`,
+  });
 
   return serializeUser(updatedUser);
 };
@@ -320,6 +354,15 @@ const createOrganizationUser = async (currentUser, payload) => {
       console.warn("Unable to set Firebase claims for managed user:", error.message);
     });
 
+    await safelyRecordAudit({
+      action: "CREATED",
+      actor: currentUser,
+      entityId: user.id,
+      entityType: "USER",
+      metadata: { role: toClientRole(user.role) },
+      summary: `Created account for ${user.fullName}`,
+    });
+
     return serializeUser(user);
   } catch (error) {
     await firebaseAuth.deleteUser(firebaseUser.uid).catch(() => {});
@@ -413,6 +456,19 @@ const updateOrganizationUser = async (currentUser, userId, payload) => {
     console.warn("Unable to refresh Firebase claims for user:", error.message);
   });
 
+  await safelyRecordAudit({
+    action: nextStatus !== existingUser.status ? "STATUS_CHANGED" : "UPDATED",
+    actor: currentUser,
+    entityId: updatedUser.id,
+    entityType: "USER",
+    metadata: {
+      fields: Object.keys(payload),
+      role: toClientRole(updatedUser.role),
+      status: String(updatedUser.status).toLowerCase(),
+    },
+    summary: `Updated account settings for ${updatedUser.fullName}`,
+  });
+
   return serializeUser(updatedUser);
 };
 
@@ -468,6 +524,18 @@ const updateUserPermissions = async (currentUser, userId, payload) => {
     where: { id: existingUser.id },
   });
 
+  await safelyRecordAudit({
+    action: "PERMISSIONS_CHANGED",
+    actor: currentUser,
+    entityId: updatedUser.id,
+    entityType: "USER",
+    metadata: {
+      permissionCount: payload.useRoleDefaults ? getRolePermissions(updatedUser.role).length : requestedPermissions.length,
+      usesRoleDefaults: payload.useRoleDefaults,
+    },
+    summary: `Updated access policy for ${updatedUser.fullName}`,
+  });
+
   return serializeUser(updatedUser);
 };
 
@@ -494,6 +562,15 @@ const deleteOrganizationUser = async (currentUser, userId) => {
       organization: true,
     },
     where: { id: existingUser.id },
+  });
+
+  await safelyRecordAudit({
+    action: "SUSPENDED",
+    actor: currentUser,
+    entityId: updatedUser.id,
+    entityType: "USER",
+    metadata: { previousStatus: String(existingUser.status).toLowerCase() },
+    summary: `Suspended account for ${updatedUser.fullName}`,
   });
 
   return serializeUser(updatedUser);

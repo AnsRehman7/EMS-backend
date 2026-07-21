@@ -110,8 +110,12 @@ const getAdministratorIds = async (organizationId) => {
   return administrators.map(({ id }) => id);
 };
 
-const notifyTaskActivity = async ({ actor, event, previousAssigneeId, task }) => {
-  const assigneeChanged = task.assignedToId && task.assignedToId !== previousAssigneeId;
+const notifyTaskActivity = async ({ actor, event, previousAssigneeId, previousTask, task }) => {
+  const priorAssigneeId = previousTask?.assignedToId ?? previousAssigneeId ?? null;
+  const previousStatus = previousTask?.status ? String(previousTask.status).toUpperCase() : null;
+  const currentStatus = String(task.status || "").toUpperCase();
+  const justCompleted = currentStatus === "COMPLETED" && previousStatus !== "COMPLETED";
+  const assigneeChanged = event !== "deleted" && task.assignedToId && task.assignedToId !== priorAssigneeId;
 
   if (assigneeChanged) {
     await createForRecipients({
@@ -128,15 +132,35 @@ const notifyTaskActivity = async ({ actor, event, previousAssigneeId, task }) =>
     });
   }
 
+  if (event !== "deleted" && priorAssigneeId && priorAssigneeId !== task.assignedToId) {
+    await createForRecipients({
+      actor,
+      notification: {
+        actionUrl: `/tasks/${task.id}`,
+        entityId: task.id,
+        entityType: "task",
+        message: `${actor.fullName} reassigned "${task.title}" to another team member.`,
+        title: "Task reassigned",
+        type: "TASK_UNASSIGNED",
+      },
+      recipientIds: [priorAssigneeId],
+    });
+  }
+
   const adminIds = await getAdministratorIds(actor.organizationId);
-  const completed = task.status === "COMPLETED" || task.status === "completed";
   const eventLabels = {
     created: "created",
     deleted: "deleted",
     time_logged: "received a work update",
     updated: "was updated",
   };
-  const eventLabel = completed ? "was completed" : eventLabels[event] || "was updated";
+  const eventLabel = justCompleted ? "was completed" : eventLabels[event] || "was updated";
+  const reassignedFromPrevious = event !== "deleted" && priorAssigneeId && priorAssigneeId !== task.assignedToId;
+  const activityRecipientIds = adminIds.filter(
+    (administratorId) =>
+      (!assigneeChanged || administratorId !== task.assignedToId) &&
+      (!reassignedFromPrevious || administratorId !== priorAssigneeId),
+  );
 
   await createForRecipients({
     actor,
@@ -145,24 +169,31 @@ const notifyTaskActivity = async ({ actor, event, previousAssigneeId, task }) =>
       entityId: task.id,
       entityType: "task",
       message: `${actor.fullName}: "${task.title}" ${eventLabel}.`,
-      title: completed ? "Task completed" : "Task activity",
-      type: completed ? "TASK_COMPLETED" : "TASK_UPDATED",
+      title: justCompleted ? "Task completed" : "Task activity",
+      type: justCompleted ? "TASK_COMPLETED" : "TASK_UPDATED",
     },
-    recipientIds: adminIds,
+    recipientIds: activityRecipientIds,
   });
 };
 
-const notifyProjectActivity = async ({ actor, event, project }) => {
+const notifyProjectActivity = async ({ actor, event, previousProject, project }) => {
   const adminIds = await getAdministratorIds(actor.organizationId);
-  const completed = project.status === "COMPLETED" || project.status === "completed";
-  const recipientIds = [...adminIds, project.ownerId].filter(Boolean);
+  const previousStatus = previousProject?.status ? String(previousProject.status).toUpperCase() : null;
+  const currentStatus = String(project.status || "").toUpperCase();
+  const justCompleted = currentStatus === "COMPLETED" && previousStatus !== "COMPLETED";
+  const previousOwnerId = previousProject?.ownerId || null;
+  const ownerChanged = event !== "deleted" && project.ownerId && project.ownerId !== previousOwnerId;
+  const recipientIds = [
+    ...adminIds.filter((administratorId) => !ownerChanged || administratorId !== project.ownerId),
+    ...(!ownerChanged && project.ownerId ? [project.ownerId] : []),
+  ];
   const eventLabels = {
     archived: "was archived",
     created: "was created",
     deleted: "was deleted",
     updated: "was updated",
   };
-  const eventLabel = completed ? "was completed" : eventLabels[event] || "was updated";
+  const eventLabel = justCompleted ? "was completed" : eventLabels[event] || "was updated";
 
   await createForRecipients({
     actor,
@@ -171,11 +202,41 @@ const notifyProjectActivity = async ({ actor, event, project }) => {
       entityId: project.id,
       entityType: "project",
       message: `${actor.fullName}: "${project.name}" ${eventLabel}.`,
-      title: completed ? "Project completed" : "Project activity",
-      type: completed ? "PROJECT_COMPLETED" : "PROJECT_UPDATED",
+      title: justCompleted ? "Project completed" : "Project activity",
+      type: justCompleted ? "PROJECT_COMPLETED" : "PROJECT_UPDATED",
     },
     recipientIds,
   });
+
+  if (ownerChanged) {
+    await createForRecipients({
+      actor,
+      notification: {
+        actionUrl: `/projects/${project.id}`,
+        entityId: project.id,
+        entityType: "project",
+        message: `${actor.fullName} made you the owner of "${project.name}".`,
+        title: "Project ownership assigned",
+        type: "PROJECT_OWNER_ASSIGNED",
+      },
+      recipientIds: [project.ownerId],
+    });
+  }
+
+  if (event !== "deleted" && previousOwnerId && previousOwnerId !== project.ownerId) {
+    await createForRecipients({
+      actor,
+      notification: {
+        actionUrl: `/projects/${project.id}`,
+        entityId: project.id,
+        entityType: "project",
+        message: `${actor.fullName} assigned a new owner to "${project.name}".`,
+        title: "Project ownership updated",
+        type: "PROJECT_OWNER_REMOVED",
+      },
+      recipientIds: [previousOwnerId],
+    });
+  }
 };
 
 const safelyNotify = async (callback) => {

@@ -95,6 +95,7 @@ model User {
   timeLogs              TimeLog[]
   receivedNotifications Notification[]   @relation("NotificationRecipient")
   sentNotifications     Notification[]   @relation("NotificationActor")
+  auditEvents           AuditLog[]        @relation("AuditActor")
 
   @@index([organizationId, role])
   @@index([organizationId, status])
@@ -104,20 +105,26 @@ model User {
 }
 
 model Organization {
-  id          String             @id @default(cuid())
-  name        String
-  slug        String             @unique
-  status      OrganizationStatus @default(TRIAL)
-  plan        BillingPlan        @default(FREE_TRIAL)
-  trialEndsAt DateTime
-  createdAt   DateTime           @default(now())
-  updatedAt   DateTime           @updatedAt
+  id            String             @id @default(cuid())
+  name          String
+  slug          String             @unique
+  status        OrganizationStatus @default(TRIAL)
+  plan          BillingPlan        @default(FREE_TRIAL)
+  trialEndsAt   DateTime
+  timezone      String             @default("Asia/Karachi")
+  workdayStart  String             @default("09:00")
+  workdayEnd    String             @default("18:00")
+  weekStartsOn  Int                @default(1)
+  departments   String[]           @default([])
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
 
   projects        Project[]
   tasks           Task[]
   users           User[]
   attendanceScans AttendanceScan[]
   notifications   Notification[]
+  auditLogs       AuditLog[]
 
   @@index([status])
   @@index([plan])
@@ -262,4 +269,25 @@ model Notification {
   @@index([organizationId, createdAt])
   @@index([entityType, entityId])
   @@map("notifications")
+}
+
+model AuditLog {
+  id             String   @id @default(cuid())
+  organizationId String
+  actorId        String?
+  action         String
+  entityType     String
+  entityId       String?
+  summary        String
+  metadata       Json?
+  createdAt      DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  actor        User?        @relation("AuditActor", fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, createdAt])
+  @@index([organizationId, entityType, entityId])
+  @@index([actorId, createdAt])
+  @@index([action])
+  @@map("audit_logs")
 }

@@ -46,6 +46,7 @@ const env = {
   firebaseClientEmail: process.env.FIREBASE_CLIENT_EMAIL,
   firebasePrivateKey: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, "\n"),
   firebaseProjectId: process.env.FIREBASE_PROJECT_ID,
+  firebaseServiceAccountBase64: process.env.FIREBASE_SERVICE_ACCOUNT_BASE64,
   firebaseServiceAccountJson: process.env.FIREBASE_SERVICE_ACCOUNT_JSON,
   firebaseWebApiKey:
     process.env.FIREBASE_WEB_API_KEY ||
@@ -64,6 +65,7 @@ const validateEnv = () => {
   const missing = [];
   const hasAdminCredential = Boolean(
     env.firebaseServiceAccountJson ||
+      env.firebaseServiceAccountBase64 ||
       (env.firebaseProjectId && env.firebaseClientEmail && env.firebasePrivateKey) ||
       process.env.GOOGLE_APPLICATION_CREDENTIALS
   );
@@ -71,7 +73,7 @@ const validateEnv = () => {
 
   if (!hasAdminCredential && !hasRestCredential) {
     missing.push(
-      "Firebase server auth: add FIREBASE_SERVICE_ACCOUNT_JSON, split service-account fields, GOOGLE_APPLICATION_CREDENTIALS, or FIREBASE_WEB_API_KEY with FIREBASE_PROJECT_ID"
+      "Firebase server auth: add FIREBASE_SERVICE_ACCOUNT_JSON, FIREBASE_SERVICE_ACCOUNT_BASE64, split service-account fields, GOOGLE_APPLICATION_CREDENTIALS, or FIREBASE_WEB_API_KEY with FIREBASE_PROJECT_ID"
     );
   }
 
