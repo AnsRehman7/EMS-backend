@@ -9,6 +9,7 @@ const router = express.Router();
 router.use(authenticate);
 
 router.get("/", projectController.listProjects);
+router.get("/:projectId/activity", projectController.getProjectActivity);
 router.get("/:projectId", projectController.getProjectById);
 router.post(
   "/",

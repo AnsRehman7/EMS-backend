@@ -46,6 +46,7 @@ Public signup creates a trial organization and makes that first user `SUPER_ADMI
 - Project progress is calculated from weighted task progress, not just task count.
 - Employees only receive tasks and project details connected to their own assignments.
 - Assignments and task/project activity create durable per-user notifications.
+- Task and project activity endpoints return an entity timeline with actor details and before/after field values.
 - Workspace reports summarize delivery, attendance, capacity, and project risk.
 - Administrative changes are written to an organization-scoped audit log.
 - User deletion is handled as suspension to preserve project and task history.

@@ -147,6 +147,35 @@ const notifyTaskActivity = async ({ actor, event, previousAssigneeId, previousTa
     });
   }
 
+  const directAssigneeId =
+    event === "deleted"
+      ? priorAssigneeId
+      : !assigneeChanged && event !== "created"
+        ? task.assignedToId
+        : null;
+
+  if (directAssigneeId) {
+    const directMessages = {
+      deleted: `${actor.fullName} removed "${task.title}".`,
+      time_logged: `${actor.fullName} added a work update to "${task.title}".`,
+      updated: justCompleted
+        ? `${actor.fullName} completed "${task.title}".`
+        : `${actor.fullName} updated "${task.title}".`,
+    };
+    await createForRecipients({
+      actor,
+      notification: {
+        actionUrl: event === "deleted" ? "/tasks" : `/tasks/${task.id}`,
+        entityId: task.id,
+        entityType: "task",
+        message: directMessages[event] || `${actor.fullName} updated "${task.title}".`,
+        title: justCompleted ? "Task completed" : event === "deleted" ? "Task removed" : "Task updated",
+        type: justCompleted ? "TASK_COMPLETED" : event === "deleted" ? "TASK_DELETED" : "TASK_UPDATED",
+      },
+      recipientIds: [directAssigneeId],
+    });
+  }
+
   const adminIds = await getAdministratorIds(actor.organizationId);
   const eventLabels = {
     created: "created",
@@ -159,7 +188,8 @@ const notifyTaskActivity = async ({ actor, event, previousAssigneeId, previousTa
   const activityRecipientIds = adminIds.filter(
     (administratorId) =>
       (!assigneeChanged || administratorId !== task.assignedToId) &&
-      (!reassignedFromPrevious || administratorId !== priorAssigneeId),
+      (!reassignedFromPrevious || administratorId !== priorAssigneeId) &&
+      administratorId !== directAssigneeId,
   );
 
   await createForRecipients({

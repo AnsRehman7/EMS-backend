@@ -4,7 +4,7 @@ const { hasPermission, PERMISSIONS } = require("../utils/permissions");
 const { calculateWeightedProjectProgress } = require("./analysis.service");
 const { generateProjectTaskPlan } = require("./projectPlanning.service");
 const { notifyProjectActivity, safelyNotify } = require("./notification.service");
-const { safelyRecordAudit } = require("./audit.service");
+const { buildChangeSet, listEntityActivity, safelyRecordAudit } = require("./audit.service");
 const { serializeTask, taskInclude } = require("./task.service");
 
 const normalizeProjectStatus = (status = "active") => String(status).trim().toUpperCase();
@@ -92,6 +92,34 @@ const getProjectHealth = ({ dueDate, progress, status }) => {
   const daysRemaining = Math.ceil((endOfDueDate.getTime() - Date.now()) / 86_400_000);
   return daysRemaining <= 7 ? "due-soon" : "on-track";
 };
+
+const projectChangeFields = [
+  { field: "name", label: "Project name" },
+  { field: "code", label: "Project code" },
+  { field: "description", label: "Description" },
+  { field: "objective", label: "Objective" },
+  { field: "status", label: "Status" },
+  { field: "priority", label: "Priority" },
+  {
+    field: "startDate",
+    label: "Start date",
+    read: (record) => record?.startDate?.toISOString().slice(0, 10) || null,
+  },
+  {
+    field: "dueDate",
+    label: "Due date",
+    read: (record) => record?.dueDate?.toISOString().slice(0, 10) || null,
+  },
+  { field: "department", label: "Department" },
+  { field: "clientName", label: "Client or stakeholder" },
+  { field: "estimatedHours", label: "Estimated hours" },
+  { field: "tags", label: "Tags" },
+  {
+    field: "ownerId",
+    label: "Owner",
+    read: (record) => record?.owner?.fullName || null,
+  },
+];
 
 const serializeProject = (project, { includeTasks = false } = {}) => {
   const tasks = project.tasks || [];
@@ -186,6 +214,51 @@ const getProjectById = async (projectId, currentUser) => {
   }
 
   return serializeProject(project, { includeTasks: true });
+};
+
+const getProjectActivity = async (projectId, currentUser) => {
+  const project = await prisma.project.findFirst({
+    select: {
+      createdAt: true,
+      createdBy: {
+        select: {
+          fullName: true,
+          id: true,
+          role: true,
+        },
+      },
+      id: true,
+      name: true,
+    },
+    where: {
+      id: projectId,
+      ...getProjectAccessWhere(currentUser),
+    },
+  });
+
+  if (!project) throw new ApiError(404, "Project not found.");
+  const activity = await listEntityActivity(currentUser, "PROJECT", projectId);
+  if (activity.some((entry) => entry.action === "created")) return activity;
+
+  return [
+    ...activity,
+    {
+      action: "created",
+      actor: {
+        id: project.createdBy.id,
+        name: project.createdBy.fullName,
+        role: String(project.createdBy.role).toLowerCase(),
+      },
+      createdAt: project.createdAt,
+      entityId: project.id,
+      entityType: "project",
+      id: `project-created-${project.id}`,
+      metadata: {},
+      summary: `Created project: ${project.name}`,
+    },
+  ].sort(
+    (first, second) => new Date(second.createdAt).getTime() - new Date(first.createdAt).getTime(),
+  );
 };
 
 const createProject = async (currentUser, payload) => {
@@ -302,6 +375,9 @@ const updateProject = async (projectId, currentUser, payload) => {
   assertPermission(currentUser, PERMISSIONS.PROJECTS_EDIT);
 
   const existingProject = await prisma.project.findFirst({
+    include: {
+      owner: true,
+    },
     where: {
       id: projectId,
       organizationId: currentUser.organizationId,
@@ -355,18 +431,21 @@ const updateProject = async (projectId, currentUser, payload) => {
     },
     where: { id: projectId },
   });
+  const changes = buildChangeSet(existingProject, project, projectChangeFields);
 
-  await safelyNotify(() =>
-    notifyProjectActivity({ actor: currentUser, event: "updated", previousProject: existingProject, project }),
-  );
-  await safelyRecordAudit({
-    action: project.status === "COMPLETED" && existingProject.status !== "COMPLETED" ? "COMPLETED" : "UPDATED",
-    actor: currentUser,
-    entityId: project.id,
-    entityType: "PROJECT",
-    metadata: { fields: Object.keys(data), previousStatus: String(existingProject.status).toLowerCase() },
-    summary: `Updated project: ${project.name}`,
-  });
+  if (changes.length) {
+    await safelyNotify(() =>
+      notifyProjectActivity({ actor: currentUser, event: "updated", previousProject: existingProject, project }),
+    );
+    await safelyRecordAudit({
+      action: project.status === "COMPLETED" && existingProject.status !== "COMPLETED" ? "COMPLETED" : "UPDATED",
+      actor: currentUser,
+      entityId: project.id,
+      entityType: "PROJECT",
+      metadata: { changes },
+      summary: `Updated project: ${project.name}`,
+    });
+  }
 
   return serializeProject(project);
 };
@@ -440,6 +519,7 @@ const deleteProject = async (projectId, currentUser) => {
 module.exports = {
   createProject,
   deleteProject,
+  getProjectActivity,
   getProjectById,
   listProjects,
   serializeProject,

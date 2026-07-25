@@ -10,6 +10,7 @@ router.use(authenticate);
 
 router.get("/", taskController.listTasks);
 router.get("/stats", taskController.getTaskStats);
+router.get("/:taskId/activity", taskController.getTaskActivity);
 router.get("/:taskId", taskController.getTaskById);
 router.post(
   "/",

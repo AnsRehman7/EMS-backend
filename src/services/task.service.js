@@ -3,7 +3,7 @@ const ApiError = require("../utils/apiError");
 const { hasPermission, PERMISSIONS } = require("../utils/permissions");
 const { analyzeTaskProgress, refreshProjectWeights, updateProjectProgress } = require("./analysis.service");
 const { notifyTaskActivity, safelyNotify } = require("./notification.service");
-const { safelyRecordAudit } = require("./audit.service");
+const { buildChangeSet, listEntityActivity, safelyRecordAudit } = require("./audit.service");
 
 const normalizePriority = (priority = "normal") => String(priority).trim().toUpperCase();
 const normalizeStatus = (status = "open") => {
@@ -78,6 +78,31 @@ const taskInclude = {
     },
   },
 };
+
+const taskChangeFields = [
+  { field: "title", label: "Title" },
+  { field: "description", label: "Description" },
+  { field: "successCriteria", label: "Success criteria" },
+  { field: "category", label: "Category" },
+  { field: "priority", label: "Priority" },
+  { field: "status", label: "Status" },
+  {
+    field: "deadline",
+    label: "Due date",
+    read: (record) => record?.deadline?.toISOString().slice(0, 10) || null,
+  },
+  { field: "estimatedHours", label: "Estimated hours" },
+  {
+    field: "assignedToId",
+    label: "Assignee",
+    read: (record) => record?.assignedTo?.fullName || null,
+  },
+  {
+    field: "projectId",
+    label: "Project",
+    read: (record) => record?.project?.name || null,
+  },
+];
 
 const listTasks = async (currentUser) => {
   const organizationWhere = { organizationId: currentUser.organizationId };
@@ -204,6 +229,92 @@ const getTaskById = async (taskId, currentUser) => {
   return serializeTask(task);
 };
 
+const getTaskActivity = async (taskId, currentUser) => {
+  const task = await prisma.task.findFirst({
+    select: {
+      assignedToId: true,
+      createdAt: true,
+      createdBy: {
+        select: {
+          fullName: true,
+          id: true,
+          role: true,
+        },
+      },
+      id: true,
+      timeLogs: {
+        include: {
+          user: {
+            select: {
+              fullName: true,
+              id: true,
+              role: true,
+            },
+          },
+        },
+        orderBy: {
+          loggedAt: "desc",
+        },
+      },
+      title: true,
+    },
+    where: {
+      id: taskId,
+      organizationId: currentUser.organizationId,
+    },
+  });
+
+  if (!task) throw new ApiError(404, "Task not found.");
+  if (!hasPermission(currentUser, PERMISSIONS.TASKS_VIEW_ALL) && task.assignedToId !== currentUser.id) {
+    throw new ApiError(403, "You can only view activity for tasks assigned to you.");
+  }
+
+  const activity = await listEntityActivity(currentUser, "TASK", taskId);
+  const auditedTimeLogIds = new Set(
+    activity.map((entry) => entry.metadata?.timeLogId).filter(Boolean),
+  );
+  const legacyTimeLogs = task.timeLogs
+    .filter((timeLog) => !auditedTimeLogIds.has(timeLog.id))
+    .map((timeLog) => ({
+      action: "time_logged",
+      actor: {
+        id: timeLog.user.id,
+        name: timeLog.user.fullName,
+        role: String(timeLog.user.role).toLowerCase(),
+      },
+      createdAt: timeLog.createdAt,
+      entityId: task.id,
+      entityType: "task",
+      id: `time-log-${timeLog.id}`,
+      metadata: {
+        hours: Number(timeLog.hours),
+        note: timeLog.note || null,
+        timeLogId: timeLog.id,
+      },
+      summary: `Logged ${Number(timeLog.hours)}h on ${task.title}`,
+    }));
+  const creationEntry = activity.some((entry) => entry.action === "created")
+    ? []
+    : [{
+        action: "created",
+        actor: {
+          id: task.createdBy.id,
+          name: task.createdBy.fullName,
+          role: String(task.createdBy.role).toLowerCase(),
+        },
+        createdAt: task.createdAt,
+        entityId: task.id,
+        entityType: "task",
+        id: `task-created-${task.id}`,
+        metadata: {},
+        summary: `Created task: ${task.title}`,
+      }];
+
+  return [...activity, ...legacyTimeLogs, ...creationEntry].sort(
+    (first, second) => new Date(second.createdAt).getTime() - new Date(first.createdAt).getTime(),
+  );
+};
+
 const updateTask = async (taskId, currentUser, payload) => {
   if (!hasPermission(currentUser, PERMISSIONS.TASKS_EDIT)) {
     throw new ApiError(403, "You do not have permission to edit tasks.");
@@ -270,22 +381,27 @@ const updateTask = async (taskId, currentUser, payload) => {
   }
 
   const updatedTask = await prisma.task.findUnique({ include: taskInclude, where: { id: taskId } });
-  await safelyNotify(() =>
-    notifyTaskActivity({
+  const changes = buildChangeSet(existingTask, updatedTask, taskChangeFields);
+  const completedTransition =
+    updatedTask.status === "COMPLETED" && existingTask.status !== "COMPLETED";
+  if (changes.length) {
+    await safelyNotify(() =>
+      notifyTaskActivity({
+        actor: currentUser,
+        event: "updated",
+        previousTask: existingTask,
+        task: updatedTask,
+      }),
+    );
+    await safelyRecordAudit({
+      action: completedTransition ? "COMPLETED" : "UPDATED",
       actor: currentUser,
-      event: "updated",
-      previousTask: existingTask,
-      task: updatedTask,
-    }),
-  );
-  await safelyRecordAudit({
-    action: "UPDATED",
-    actor: currentUser,
-    entityId: updatedTask.id,
-    entityType: "TASK",
-    metadata: { fields: Object.keys(data), previousAssigneeId: existingTask.assignedToId },
-    summary: `Updated task: ${updatedTask.title}`,
-  });
+      entityId: updatedTask.id,
+      entityType: "TASK",
+      metadata: { changes },
+      summary: `${completedTransition ? "Completed" : "Updated"} task: ${updatedTask.title}`,
+    });
+  }
   return serializeTask(updatedTask);
 };
 
@@ -320,7 +436,7 @@ const updateTaskStatus = async (taskId, status, currentUser) => {
     actor: currentUser,
     entityId: task.id,
     entityType: "TASK",
-    metadata: { from: String(existingTask.status).toLowerCase(), to: String(task.status).toLowerCase() },
+    metadata: { changes: buildChangeSet(existingTask, task, taskChangeFields) },
     summary: `Moved ${task.title} to ${String(task.status).toLowerCase().replace("_", " ")}`,
   });
 
@@ -371,7 +487,11 @@ const createTimeLog = async (taskId, currentUser, payload) => {
     actor: currentUser,
     entityId: task.id,
     entityType: "TASK",
-    metadata: { hours: Number(timeLog.hours), timeLogId: timeLog.id },
+    metadata: {
+      hours: Number(timeLog.hours),
+      note: payload.note || null,
+      timeLogId: timeLog.id,
+    },
     summary: `Logged ${Number(timeLog.hours)}h on ${task.title}`,
   });
 
@@ -422,6 +542,7 @@ module.exports = {
   createTimeLog,
   createTask,
   deleteTask,
+  getTaskActivity,
   getTaskById,
   getTaskStats,
   listTasks,

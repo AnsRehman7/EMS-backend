@@ -23,6 +23,11 @@ const getTaskById = asyncHandler(async (req, res) => {
   res.status(200).json({ data: { task } });
 });
 
+const getTaskActivity = asyncHandler(async (req, res) => {
+  const activity = await taskService.getTaskActivity(req.params.taskId, req.user);
+  res.status(200).json({ data: { activity } });
+});
+
 const createTask = asyncHandler(async (req, res) => {
   const payload = parseBody(createTaskSchema, req.body);
   const task = await taskService.createTask(req.user, payload);
@@ -60,6 +65,7 @@ module.exports = {
   createTimeLog,
   createTask,
   deleteTask,
+  getTaskActivity,
   getTaskById,
   getTaskStats,
   listTasks,

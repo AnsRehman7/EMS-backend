@@ -12,6 +12,11 @@ const getProjectById = asyncHandler(async (req, res) => {
   res.status(200).json({ data: { project } });
 });
 
+const getProjectActivity = asyncHandler(async (req, res) => {
+  const activity = await projectService.getProjectActivity(req.params.projectId, req.user);
+  res.status(200).json({ data: { activity } });
+});
+
 const createProject = asyncHandler(async (req, res) => {
   const payload = parseBody(createProjectSchema, req.body);
   const project = await projectService.createProject(req.user, payload);
@@ -37,6 +42,7 @@ const deleteProject = asyncHandler(async (req, res) => {
 module.exports = {
   createProject,
   deleteProject,
+  getProjectActivity,
   getProjectById,
   listProjects,
   updateProject,
