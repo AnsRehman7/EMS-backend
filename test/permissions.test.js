@@ -10,6 +10,8 @@ const {
 
 test("role defaults preserve attendance and reporting boundaries", () => {
   assert.equal(hasPermission({ role: "SUPER_ADMIN" }, PERMISSIONS.SETTINGS_MANAGE), true);
+  assert.equal(hasPermission({ role: "SUPER_ADMIN" }, PERMISSIONS.CUSTOMIZATION_MANAGE), true);
+  assert.equal(hasPermission({ role: "ADMIN" }, PERMISSIONS.CUSTOMIZATION_MANAGE), false);
   assert.equal(hasPermission({ role: "ADMIN" }, PERMISSIONS.BILLING_MANAGE), false);
   assert.equal(hasPermission({ role: "HR" }, PERMISSIONS.ATTENDANCE_VIEW_ALL), true);
   assert.equal(hasPermission({ role: "ACCOUNTS" }, PERMISSIONS.ATTENDANCE_VIEW_ALL), true);

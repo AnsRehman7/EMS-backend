@@ -20,6 +20,13 @@ const {
   USER_ROLES,
 } = require("../utils/roles");
 const { safelyRecordAudit } = require("./audit.service");
+const {
+  attachSystemCustomData,
+  getSystemEntityData,
+  saveSystemEntityData,
+  validateSystemCustomValues,
+  validateSystemFields,
+} = require("./module.service");
 
 const normalizeEmail = (email = "") => email.trim().toLowerCase();
 const normalizeStatus = (status = "active") => String(status || "active").trim().toUpperCase();
@@ -59,6 +66,9 @@ const serializeUser = (user) => {
     canEditProjects: hasPermission(user, PERMISSIONS.PROJECTS_EDIT),
     canEditTasks: hasPermission(user, PERMISSIONS.TASKS_EDIT),
     canManageBilling: canManageBilling(user),
+    canManageCustomization:
+      user.role === USER_ROLES.SUPER_ADMIN &&
+      hasPermission(user, PERMISSIONS.CUSTOMIZATION_MANAGE),
     canManagePermissions: hasPermission(user, PERMISSIONS.PERMISSIONS_MANAGE),
     canManageSettings: hasPermission(user, PERMISSIONS.SETTINGS_MANAGE),
     canManageUsers: canManageUsers(user),
@@ -76,6 +86,9 @@ const serializeUser = (user) => {
   updatedAt: user.updatedAt,
   };
 };
+
+const serializeUserWithCustomData = async (actor, user) =>
+  (await attachSystemCustomData(actor, "users", [serializeUser(user)]))[0];
 
 const slugify = (value = "") =>
   value
@@ -175,7 +188,7 @@ const syncUserProfile = async (firebaseUser, payload = {}) => {
       where: { id: existingUser.id },
     });
 
-    return serializeUser(updatedUser);
+    return serializeUserWithCustomData(updatedUser, updatedUser);
   }
 
   if (!payload.organizationName) {
@@ -226,12 +239,27 @@ const syncUserProfile = async (firebaseUser, payload = {}) => {
     summary: `Created workspace: ${createdUser.organization.name}`,
   });
 
-  return serializeUser(createdUser);
+  return serializeUserWithCustomData(createdUser, createdUser);
 };
 
-const getCurrentUser = (user) => serializeUser(user);
+const getCurrentUser = (user) => serializeUserWithCustomData(user, user);
 
 const updateCurrentProfile = async (currentUser, payload) => {
+  const existingCustomFields = await getSystemEntityData(currentUser, "users", currentUser.id);
+  const preparedCustomFields =
+    payload.customFields === undefined
+      ? existingCustomFields
+      : await validateSystemCustomValues({
+          currentUser,
+          existingValues: existingCustomFields,
+          systemKey: "users",
+          values: payload.customFields,
+        });
+  await validateSystemFields({
+    currentUser,
+    systemKey: "users",
+    values: { ...currentUser, ...payload },
+  });
   const updatedUser = await prisma.user.update({
     data: {
       contact: payload.contact ?? currentUser.contact,
@@ -260,7 +288,18 @@ const updateCurrentProfile = async (currentUser, payload) => {
     summary: `${updatedUser.fullName} updated their profile`,
   });
 
-  return serializeUser(updatedUser);
+  const customFields =
+    payload.customFields === undefined
+      ? existingCustomFields
+      : await saveSystemEntityData({
+          currentUser,
+          entityId: currentUser.id,
+          existingValues: existingCustomFields,
+          preparedData: preparedCustomFields,
+          systemKey: "users",
+          values: payload.customFields,
+        });
+  return { ...serializeUser(updatedUser), customFields };
 };
 
 const listEmployees = async (currentUser) => {
@@ -277,7 +316,7 @@ const listEmployees = async (currentUser) => {
     },
   });
 
-  return employees.map(serializeUser);
+  return attachSystemCustomData(currentUser, "users", employees.map(serializeUser));
 };
 
 const listUsers = async (currentUser) => {
@@ -293,7 +332,7 @@ const listUsers = async (currentUser) => {
     },
   });
 
-  return users.map(serializeUser);
+  return attachSystemCustomData(currentUser, "users", users.map(serializeUser));
 };
 
 const assertCanManageUser = (actor, targetRole) => {
@@ -310,6 +349,16 @@ const createOrganizationUser = async (currentUser, payload) => {
   ensureOrganization(currentUser);
   const role = normalizeRole(payload.role);
   assertCanManageUser(currentUser, role);
+  const customFields = await validateSystemCustomValues({
+    currentUser,
+    systemKey: "users",
+    values: payload.customFields,
+  });
+  await validateSystemFields({
+    currentUser,
+    systemKey: "users",
+    values: { ...payload, role, status: "ACTIVE" },
+  });
 
   const email = normalizeEmail(payload.email);
   let firebaseUser;
@@ -363,8 +412,16 @@ const createOrganizationUser = async (currentUser, payload) => {
       summary: `Created account for ${user.fullName}`,
     });
 
-    return serializeUser(user);
+    const savedCustomFields = await saveSystemEntityData({
+      currentUser,
+      entityId: user.id,
+      preparedData: customFields,
+      systemKey: "users",
+      values: payload.customFields,
+    });
+    return { ...serializeUser(user), customFields: savedCustomFields };
   } catch (error) {
+    await prisma.user.deleteMany({ where: { firebaseUid: firebaseUser.uid } }).catch(() => {});
     await firebaseAuth.deleteUser(firebaseUser.uid).catch(() => {});
     throw error;
   }
@@ -390,10 +447,21 @@ const getManagedUser = async (currentUser, userId) => {
   return user;
 };
 
-const getUserById = async (currentUser, userId) => serializeUser(await getManagedUser(currentUser, userId));
+const getUserById = async (currentUser, userId) =>
+  serializeUserWithCustomData(currentUser, await getManagedUser(currentUser, userId));
 
 const updateOrganizationUser = async (currentUser, userId, payload) => {
   const existingUser = await getManagedUser(currentUser, userId);
+  const existingCustomFields = await getSystemEntityData(currentUser, "users", userId);
+  const preparedCustomFields =
+    payload.customFields === undefined
+      ? existingCustomFields
+      : await validateSystemCustomValues({
+          currentUser,
+          existingValues: existingCustomFields,
+          systemKey: "users",
+          values: payload.customFields,
+        });
   const nextRole = payload.role ? normalizeRole(payload.role) : existingUser.role;
 
   if (existingUser.role === USER_ROLES.SUPER_ADMIN && currentUser.role !== USER_ROLES.SUPER_ADMIN) {
@@ -412,6 +480,18 @@ const updateOrganizationUser = async (currentUser, userId, payload) => {
 
   const nextEmail = payload.email ? normalizeEmail(payload.email) : existingUser.email;
   const nextStatus = payload.status ? normalizeStatus(payload.status) : existingUser.status;
+  await validateSystemFields({
+    currentUser,
+    systemKey: "users",
+    values: {
+      ...existingUser,
+      ...payload,
+      email: nextEmail,
+      fullName: payload.fullName || existingUser.fullName,
+      role: nextRole,
+      status: nextStatus,
+    },
+  });
   const firebaseUpdates = {};
 
   if (nextEmail !== existingUser.email) firebaseUpdates.email = nextEmail;
@@ -469,7 +549,18 @@ const updateOrganizationUser = async (currentUser, userId, payload) => {
     summary: `Updated account settings for ${updatedUser.fullName}`,
   });
 
-  return serializeUser(updatedUser);
+  const customFields =
+    payload.customFields === undefined
+      ? existingCustomFields
+      : await saveSystemEntityData({
+          currentUser,
+          entityId: updatedUser.id,
+          existingValues: existingCustomFields,
+          preparedData: preparedCustomFields,
+          systemKey: "users",
+          values: payload.customFields,
+        });
+  return { ...serializeUser(updatedUser), customFields };
 };
 
 const updateUserRole = async (currentUser, userId, role) => updateOrganizationUser(currentUser, userId, { role });
@@ -505,6 +596,12 @@ const updateUserPermissions = async (currentUser, userId, payload) => {
   if (requestedPermissions.some((permission) => !isKnownPermission(permission))) {
     throw new ApiError(400, "One or more selected permissions are not supported.");
   }
+  if (
+    existingUser.role !== USER_ROLES.SUPER_ADMIN &&
+    requestedPermissions.includes(PERMISSIONS.CUSTOMIZATION_MANAGE)
+  ) {
+    throw new ApiError(400, "Module customization is reserved for super admin accounts.");
+  }
 
   const actorPermissions = resolvePermissions(currentUser);
   if (
@@ -536,7 +633,7 @@ const updateUserPermissions = async (currentUser, userId, payload) => {
     summary: `Updated access policy for ${updatedUser.fullName}`,
   });
 
-  return serializeUser(updatedUser);
+  return serializeUserWithCustomData(currentUser, updatedUser);
 };
 
 const deleteOrganizationUser = async (currentUser, userId) => {
@@ -573,7 +670,7 @@ const deleteOrganizationUser = async (currentUser, userId) => {
     summary: `Suspended account for ${updatedUser.fullName}`,
   });
 
-  return serializeUser(updatedUser);
+  return serializeUserWithCustomData(currentUser, updatedUser);
 };
 
 module.exports = {

@@ -2,6 +2,7 @@ const PERMISSIONS = Object.freeze({
   ATTENDANCE_MANAGE: "attendance.manage",
   ATTENDANCE_VIEW_ALL: "attendance.view_all",
   BILLING_MANAGE: "billing.manage",
+  CUSTOMIZATION_MANAGE: "customization.manage",
   AUDIT_VIEW: "audit.view",
   DASHBOARD_VIEW: "dashboard.view",
   PERMISSIONS_MANAGE: "permissions.manage",
@@ -117,6 +118,13 @@ const PERMISSION_CATALOG = Object.freeze([
     label: "Manage workspace settings",
   },
   {
+    description: "Create modules and configure workspace fields and validation rules.",
+    group: "Administration",
+    key: PERMISSIONS.CUSTOMIZATION_MANAGE,
+    label: "Manage modules and fields",
+    roles: ["super_admin"],
+  },
+  {
     description: "Review the immutable history of important workspace changes.",
     group: "Administration",
     key: PERMISSIONS.AUDIT_VIEW,
@@ -134,7 +142,10 @@ const allPermissions = PERMISSION_CATALOG.map(({ key }) => key);
 
 const ROLE_PERMISSIONS = Object.freeze({
   SUPER_ADMIN: allPermissions,
-  ADMIN: allPermissions.filter((permission) => permission !== PERMISSIONS.BILLING_MANAGE),
+  ADMIN: allPermissions.filter(
+    (permission) =>
+      ![PERMISSIONS.BILLING_MANAGE, PERMISSIONS.CUSTOMIZATION_MANAGE].includes(permission),
+  ),
   MANAGER: [
     PERMISSIONS.DASHBOARD_VIEW,
     PERMISSIONS.REPORTS_VIEW,

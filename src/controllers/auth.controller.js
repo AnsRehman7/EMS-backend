@@ -10,7 +10,8 @@ const syncProfile = asyncHandler(async (req, res) => {
 });
 
 const getMe = asyncHandler(async (req, res) => {
-  res.status(200).json({ data: { user: userService.getCurrentUser(req.user) } });
+  const user = await userService.getCurrentUser(req.user);
+  res.status(200).json({ data: { user } });
 });
 
 const updateMe = asyncHandler(async (req, res) => {

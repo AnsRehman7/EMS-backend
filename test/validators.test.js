@@ -1,7 +1,11 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
+  createModuleSchema,
   createProjectSchema,
+  customFieldInputSchema,
+  customRecordSchema,
+  updateCustomFieldSchema,
   updateTaskSchema,
   updateWorkspaceSettingsSchema,
 } = require("../src/utils/validators");
@@ -34,6 +38,46 @@ test("task updates support intentionally clearing an assignee", () => {
   const result = updateTaskSchema.parse({ assignedToId: null, estimatedHours: "2.5" });
   assert.equal(result.assignedToId, null);
   assert.equal(result.estimatedHours, 2.5);
+});
+
+test("custom modules require a stable key and at least one typed field", () => {
+  const valid = createModuleSchema.safeParse({
+    fields: [{ isRequired: true, key: "asset_name", label: "Asset name", type: "text" }],
+    key: "assets",
+    pluralName: "Assets",
+    singularName: "Asset",
+  });
+  const invalid = createModuleSchema.safeParse({
+    fields: [],
+    key: "Invalid key",
+    pluralName: "Assets",
+    singularName: "Asset",
+  });
+
+  assert.equal(valid.success, true);
+  assert.equal(invalid.success, false);
+});
+
+test("custom field and record schemas retain typed values", () => {
+  const field = customFieldInputSchema.parse({
+    key: "replacement_cost",
+    label: "Replacement cost",
+    type: "decimal",
+    validation: { min: 0 },
+  });
+  const record = customRecordSchema.parse({
+    values: { active: false, replacement_cost: 1250.5, tags: ["insured"] },
+  });
+
+  assert.equal(field.type, "decimal");
+  assert.equal(field.validation.min, 0);
+  assert.deepEqual(record.values.tags, ["insured"]);
+});
+
+test("custom field patches do not reset omitted settings", () => {
+  const patch = updateCustomFieldSchema.parse({ archived: false });
+
+  assert.deepEqual(patch, { archived: false });
 });
 
 test("AI task plans normalize dates, priorities, and weights", () => {

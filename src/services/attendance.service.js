@@ -3,6 +3,12 @@ const { env } = require("../config/env");
 const ApiError = require("../utils/apiError");
 const { canManageAttendance, canViewOrganizationAttendance } = require("../utils/roles");
 const { safelyRecordAudit } = require("./audit.service");
+const {
+  attachSystemCustomData,
+  saveSystemEntityData,
+  validateSystemCustomValues,
+  validateSystemFields,
+} = require("./module.service");
 
 const toNumber = (value) => (value === null || value === undefined ? null : Number(value));
 const normalizeDirection = (direction) => String(direction || "").trim().toUpperCase();
@@ -104,7 +110,7 @@ const listScans = async (currentUser, { date } = {}) => {
     },
   });
 
-  return scans.map(serializeScan);
+  return attachSystemCustomData(currentUser, "attendance", scans.map(serializeScan));
 };
 
 const resolveScanUser = async (currentUser, requestedUserId) => {
@@ -130,10 +136,21 @@ const resolveScanUser = async (currentUser, requestedUserId) => {
 };
 
 const createScan = async (currentUser, payload) => {
+  const customFields = await validateSystemCustomValues({
+    currentUser,
+    systemKey: "attendance",
+    values: payload.customFields,
+  });
   const scanUser = await resolveScanUser(currentUser, payload.userId);
   const latitude = payload.latitude;
   const longitude = payload.longitude;
   const source = payload.source || "mobile_fingerprint";
+  const scannedAt = parseDate(payload.scannedAt, "Scan time");
+  await validateSystemFields({
+    currentUser,
+    systemKey: "attendance",
+    values: { ...payload, scannedAt, source, userId: scanUser.id },
+  });
   const isMobileScan = source.toLowerCase().includes("mobile");
   const distanceMeters = calculateDistanceMeters({ latitude, longitude });
   const geofenceConfigured = env.officeLatitude !== undefined && env.officeLongitude !== undefined;
@@ -155,7 +172,7 @@ const createScan = async (currentUser, payload) => {
       longitude: longitude ?? null,
       organizationId: currentUser.organizationId,
       rejectionReason,
-      scannedAt: parseDate(payload.scannedAt, "Scan time"),
+      scannedAt,
       source,
       userId: scanUser.id,
     },
@@ -173,7 +190,14 @@ const createScan = async (currentUser, payload) => {
     summary: `${accepted ? "Recorded" : "Rejected"} ${String(scan.direction).toLowerCase()} attendance for ${scanUser.fullName}`,
   });
 
-  return serializeScan(scan);
+  const savedCustomFields = await saveSystemEntityData({
+    currentUser,
+    entityId: scan.id,
+    preparedData: customFields,
+    systemKey: "attendance",
+    values: payload.customFields,
+  });
+  return { ...serializeScan(scan), customFields: savedCustomFields };
 };
 
 module.exports = {

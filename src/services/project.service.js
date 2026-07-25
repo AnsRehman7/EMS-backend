@@ -6,6 +6,14 @@ const { generateProjectTaskPlan } = require("./projectPlanning.service");
 const { notifyProjectActivity, safelyNotify } = require("./notification.service");
 const { buildChangeSet, listEntityActivity, safelyRecordAudit } = require("./audit.service");
 const { serializeTask, taskInclude } = require("./task.service");
+const {
+  attachSystemCustomData,
+  deleteSystemEntityData,
+  getSystemEntityData,
+  saveSystemEntityData,
+  validateSystemCustomValues,
+  validateSystemFields,
+} = require("./module.service");
 
 const normalizeProjectStatus = (status = "active") => String(status).trim().toUpperCase();
 const normalizeProjectPriority = (priority = "normal") => String(priority).trim().toUpperCase();
@@ -189,7 +197,7 @@ const listProjects = async (currentUser) => {
     where: getProjectAccessWhere(currentUser),
   });
 
-  return projects.map((project) => serializeProject(project));
+  return attachSystemCustomData(currentUser, "projects", projects.map((project) => serializeProject(project)));
 };
 
 const getProjectById = async (projectId, currentUser) => {
@@ -213,7 +221,10 @@ const getProjectById = async (projectId, currentUser) => {
     throw new ApiError(404, "Project not found.");
   }
 
-  return serializeProject(project, { includeTasks: true });
+  const serialized = serializeProject(project, { includeTasks: true });
+  const [withProjectFields] = await attachSystemCustomData(currentUser, "projects", [serialized]);
+  withProjectFields.tasks = await attachSystemCustomData(currentUser, "tasks", withProjectFields.tasks);
+  return withProjectFields;
 };
 
 const getProjectActivity = async (projectId, currentUser) => {
@@ -263,6 +274,11 @@ const getProjectActivity = async (projectId, currentUser) => {
 
 const createProject = async (currentUser, payload) => {
   assertPermission(currentUser, PERMISSIONS.PROJECTS_CREATE);
+  const customFields = await validateSystemCustomValues({
+    currentUser,
+    systemKey: "projects",
+    values: payload.customFields,
+  });
 
   const startDate = parseDate(payload.startDate, "Start date");
   const dueDate = parseDate(payload.dueDate, "Due date");
@@ -291,6 +307,11 @@ const createProject = async (currentUser, payload) => {
     : startDate && startDate.getTime() > Date.now()
       ? "PLANNED"
       : "ACTIVE";
+  await validateSystemFields({
+    currentUser,
+    systemKey: "projects",
+    values: { ...payload, ownerId: owner?.id, status: projectStatus },
+  });
 
   const project = await prisma.$transaction(async (transaction) => {
     const createdProject = await transaction.project.create({
@@ -368,7 +389,14 @@ const createProject = async (currentUser, payload) => {
     summary: `Created project: ${project.name}`,
   });
 
-  return serializeProject(project);
+  const savedCustomFields = await saveSystemEntityData({
+    currentUser,
+    entityId: project.id,
+    preparedData: customFields,
+    systemKey: "projects",
+    values: payload.customFields,
+  });
+  return { ...serializeProject(project), customFields: savedCustomFields };
 };
 
 const updateProject = async (projectId, currentUser, payload) => {
@@ -387,6 +415,16 @@ const updateProject = async (projectId, currentUser, payload) => {
   if (!existingProject) {
     throw new ApiError(404, "Project not found.");
   }
+  const existingCustomFields = await getSystemEntityData(currentUser, "projects", projectId);
+  const preparedCustomFields =
+    payload.customFields === undefined
+      ? existingCustomFields
+      : await validateSystemCustomValues({
+          currentUser,
+          existingValues: existingCustomFields,
+          systemKey: "projects",
+          values: payload.customFields,
+        });
 
   const data = {};
   if (payload.clientName !== undefined) data.clientName = payload.clientName || null;
@@ -410,6 +448,11 @@ const updateProject = async (projectId, currentUser, payload) => {
   if (payload.tags !== undefined) data.tags = payload.tags;
 
   validateProjectDates(data.startDate ?? existingProject.startDate, data.dueDate ?? existingProject.dueDate);
+  await validateSystemFields({
+    currentUser,
+    systemKey: "projects",
+    values: { ...existingProject, ...data },
+  });
 
   const project = await prisma.project.update({
     data,
@@ -447,7 +490,18 @@ const updateProject = async (projectId, currentUser, payload) => {
     });
   }
 
-  return serializeProject(project);
+  const customFields =
+    payload.customFields === undefined
+      ? existingCustomFields
+      : await saveSystemEntityData({
+          currentUser,
+          entityId: projectId,
+          existingValues: existingCustomFields,
+          preparedData: preparedCustomFields,
+          systemKey: "projects",
+          values: payload.customFields,
+        });
+  return { ...serializeProject(project), customFields };
 };
 
 const deleteProject = async (projectId, currentUser) => {
@@ -503,6 +557,7 @@ const deleteProject = async (projectId, currentUser) => {
   }
 
   await prisma.project.delete({ where: { id: projectId } });
+  await deleteSystemEntityData(currentUser, "projects", projectId);
   await safelyNotify(() =>
     notifyProjectActivity({ actor: currentUser, event: "deleted", previousProject: existingProject, project: existingProject }),
   );

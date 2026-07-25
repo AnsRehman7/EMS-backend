@@ -4,6 +4,14 @@ const { hasPermission, PERMISSIONS } = require("../utils/permissions");
 const { analyzeTaskProgress, refreshProjectWeights, updateProjectProgress } = require("./analysis.service");
 const { notifyTaskActivity, safelyNotify } = require("./notification.service");
 const { buildChangeSet, listEntityActivity, safelyRecordAudit } = require("./audit.service");
+const {
+  attachSystemCustomData,
+  deleteSystemEntityData,
+  getSystemEntityData,
+  saveSystemEntityData,
+  validateSystemCustomValues,
+  validateSystemFields,
+} = require("./module.service");
 
 const normalizePriority = (priority = "normal") => String(priority).trim().toUpperCase();
 const normalizeStatus = (status = "open") => {
@@ -114,13 +122,18 @@ const listTasks = async (currentUser) => {
       : { ...organizationWhere, assignedToId: currentUser.id },
   });
 
-  return tasks.map(serializeTask);
+  return attachSystemCustomData(currentUser, "tasks", tasks.map(serializeTask));
 };
 
 const createTask = async (currentUser, payload) => {
   if (!hasPermission(currentUser, PERMISSIONS.TASKS_CREATE)) {
     throw new ApiError(403, "You do not have permission to assign tasks.");
   }
+  const customFields = await validateSystemCustomValues({
+    currentUser,
+    systemKey: "tasks",
+    values: payload.customFields,
+  });
 
   const assignee = await prisma.user.findFirst({
     where: {
@@ -148,6 +161,11 @@ const createTask = async (currentUser, payload) => {
   if (project.status === "ARCHIVED") {
     throw new ApiError(400, "Archived projects cannot receive new tasks.");
   }
+  await validateSystemFields({
+    currentUser,
+    systemKey: "tasks",
+    values: { ...payload, assignedToId: assignee.id, projectId: project.id },
+  });
 
   const task = await prisma.task.create({
     data: {
@@ -186,7 +204,14 @@ const createTask = async (currentUser, payload) => {
     summary: `Created task: ${analyzedTask.title}`,
   });
 
-  return serializeTask(analyzedTask);
+  const savedCustomFields = await saveSystemEntityData({
+    currentUser,
+    entityId: analyzedTask.id,
+    preparedData: customFields,
+    systemKey: "tasks",
+    values: payload.customFields,
+  });
+  return { ...serializeTask(analyzedTask), customFields: savedCustomFields };
 };
 
 const getTaskForAction = async (taskId, currentUser) => {
@@ -226,7 +251,7 @@ const getTaskById = async (taskId, currentUser) => {
     throw new ApiError(403, "You can only view tasks assigned to you.");
   }
 
-  return serializeTask(task);
+  return (await attachSystemCustomData(currentUser, "tasks", [serializeTask(task)]))[0];
 };
 
 const getTaskActivity = async (taskId, currentUser) => {
@@ -321,6 +346,16 @@ const updateTask = async (taskId, currentUser, payload) => {
   }
 
   const existingTask = await getTaskForAction(taskId, currentUser);
+  const existingCustomFields = await getSystemEntityData(currentUser, "tasks", taskId);
+  const preparedCustomFields =
+    payload.customFields === undefined
+      ? existingCustomFields
+      : await validateSystemCustomValues({
+          currentUser,
+          existingValues: existingCustomFields,
+          systemKey: "tasks",
+          values: payload.customFields,
+        });
   const data = {};
 
   if (payload.assignedToId !== undefined) {
@@ -369,6 +404,11 @@ const updateTask = async (taskId, currentUser, payload) => {
     data.aiProgress = status === "COMPLETED" ? 100 : Math.min(existingTask.aiProgress || 0, 95);
     data.completedAt = status === "COMPLETED" ? existingTask.completedAt || new Date() : null;
   }
+  await validateSystemFields({
+    currentUser,
+    systemKey: "tasks",
+    values: { ...existingTask, ...data },
+  });
 
   await prisma.task.update({ data, where: { id: taskId } });
 
@@ -402,7 +442,18 @@ const updateTask = async (taskId, currentUser, payload) => {
       summary: `${completedTransition ? "Completed" : "Updated"} task: ${updatedTask.title}`,
     });
   }
-  return serializeTask(updatedTask);
+  const customFields =
+    payload.customFields === undefined
+      ? existingCustomFields
+      : await saveSystemEntityData({
+          currentUser,
+          entityId: taskId,
+          existingValues: existingCustomFields,
+          preparedData: preparedCustomFields,
+          systemKey: "tasks",
+          values: payload.customFields,
+        });
+  return { ...serializeTask(updatedTask), customFields };
 };
 
 const updateTaskStatus = async (taskId, status, currentUser) => {
@@ -440,7 +491,7 @@ const updateTaskStatus = async (taskId, status, currentUser) => {
     summary: `Moved ${task.title} to ${String(task.status).toLowerCase().replace("_", " ")}`,
   });
 
-  return serializeTask(task);
+  return (await attachSystemCustomData(currentUser, "tasks", [serializeTask(task)]))[0];
 };
 
 const createTimeLog = async (taskId, currentUser, payload) => {
@@ -505,6 +556,7 @@ const deleteTask = async (taskId, currentUser) => {
 
   const task = await getTaskForAction(taskId, currentUser);
   await prisma.task.delete({ where: { id: taskId } });
+  await deleteSystemEntityData(currentUser, "tasks", taskId);
   await refreshProjectWeights(task.projectId, currentUser.organizationId);
   await safelyNotify(() =>
     notifyTaskActivity({

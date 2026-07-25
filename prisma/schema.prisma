@@ -67,6 +67,32 @@ enum ProjectPriority {
   CRITICAL
 }
 
+enum ModuleKind {
+  SYSTEM
+  CUSTOM
+}
+
+enum ModuleStatus {
+  ACTIVE
+  ARCHIVED
+}
+
+enum CustomFieldType {
+  TEXT
+  LONG_TEXT
+  INTEGER
+  DECIMAL
+  BOOLEAN
+  DATE
+  DATETIME
+  EMAIL
+  PHONE
+  URL
+  SELECT
+  MULTI_SELECT
+  USER
+}
+
 model User {
   id                    String     @id @default(cuid())
   firebaseUid           String     @unique
@@ -84,18 +110,24 @@ model User {
   createdAt             DateTime   @default(now())
   updatedAt             DateTime   @updatedAt
 
-  assignedTasks         Task[]           @relation("AssignedTasks")
-  createdTasks          Task[]           @relation("CreatedTasks")
-  createdProjects       Project[]        @relation("CreatedProjects")
-  ownedProjects         Project[]        @relation("OwnedProjects")
-  invitedBy             User?            @relation("UserInvitations", fields: [invitedById], references: [id], onDelete: SetNull)
-  invitedUsers          User[]           @relation("UserInvitations")
-  organization          Organization     @relation(fields: [organizationId], references: [id], onDelete: Restrict)
-  attendanceScans       AttendanceScan[]
-  timeLogs              TimeLog[]
-  receivedNotifications Notification[]   @relation("NotificationRecipient")
-  sentNotifications     Notification[]   @relation("NotificationActor")
-  auditEvents           AuditLog[]        @relation("AuditActor")
+  assignedTasks            Task[]               @relation("AssignedTasks")
+  createdTasks             Task[]               @relation("CreatedTasks")
+  createdProjects          Project[]            @relation("CreatedProjects")
+  ownedProjects            Project[]            @relation("OwnedProjects")
+  invitedBy                User?                @relation("UserInvitations", fields: [invitedById], references: [id], onDelete: SetNull)
+  invitedUsers             User[]               @relation("UserInvitations")
+  organization             Organization         @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  attendanceScans          AttendanceScan[]
+  timeLogs                 TimeLog[]
+  receivedNotifications    Notification[]       @relation("NotificationRecipient")
+  sentNotifications        Notification[]       @relation("NotificationActor")
+  auditEvents              AuditLog[]           @relation("AuditActor")
+  createdModuleDefinitions ModuleDefinition[]   @relation("ModuleDefinitionCreator")
+  updatedModuleDefinitions ModuleDefinition[]   @relation("ModuleDefinitionUpdater")
+  createdCustomRecords     CustomModuleRecord[] @relation("CustomRecordCreator")
+  updatedCustomRecords     CustomModuleRecord[] @relation("CustomRecordUpdater")
+  createdCustomData        CustomEntityData[]   @relation("CustomDataCreator")
+  updatedCustomData        CustomEntityData[]   @relation("CustomDataUpdater")
 
   @@index([organizationId, role])
   @@index([organizationId, status])
@@ -105,26 +137,29 @@ model User {
 }
 
 model Organization {
-  id            String             @id @default(cuid())
-  name          String
-  slug          String             @unique
-  status        OrganizationStatus @default(TRIAL)
-  plan          BillingPlan        @default(FREE_TRIAL)
-  trialEndsAt   DateTime
-  timezone      String             @default("Asia/Karachi")
-  workdayStart  String             @default("09:00")
-  workdayEnd    String             @default("18:00")
-  weekStartsOn  Int                @default(1)
-  departments   String[]           @default([])
-  createdAt     DateTime           @default(now())
-  updatedAt     DateTime           @updatedAt
+  id           String             @id @default(cuid())
+  name         String
+  slug         String             @unique
+  status       OrganizationStatus @default(TRIAL)
+  plan         BillingPlan        @default(FREE_TRIAL)
+  trialEndsAt  DateTime
+  timezone     String             @default("Asia/Karachi")
+  workdayStart String             @default("09:00")
+  workdayEnd   String             @default("18:00")
+  weekStartsOn Int                @default(1)
+  departments  String[]           @default([])
+  createdAt    DateTime           @default(now())
+  updatedAt    DateTime           @updatedAt
 
-  projects        Project[]
-  tasks           Task[]
-  users           User[]
-  attendanceScans AttendanceScan[]
-  notifications   Notification[]
-  auditLogs       AuditLog[]
+  projects            Project[]
+  tasks               Task[]
+  users               User[]
+  attendanceScans     AttendanceScan[]
+  notifications       Notification[]
+  auditLogs           AuditLog[]
+  moduleDefinitions   ModuleDefinition[]
+  customModuleRecords CustomModuleRecord[]
+  customEntityData    CustomEntityData[]
 
   @@index([status])
   @@index([plan])
@@ -290,4 +325,110 @@ model AuditLog {
   @@index([actorId, createdAt])
   @@index([action])
   @@map("audit_logs")
+}
+
+model ModuleDefinition {
+  id             String       @id @default(cuid())
+  organizationId String
+  key            String
+  singularName   String
+  pluralName     String
+  description    String?
+  icon           String       @default("database")
+  kind           ModuleKind
+  systemKey      String?
+  status         ModuleStatus @default(ACTIVE)
+  primaryFieldId String?
+  viewRoles      String[]     @default([])
+  createRoles    String[]     @default([])
+  editRoles      String[]     @default([])
+  deleteRoles    String[]     @default([])
+  createdById    String?
+  updatedById    String?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  organization Organization            @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  createdBy    User?                   @relation("ModuleDefinitionCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  updatedBy    User?                   @relation("ModuleDefinitionUpdater", fields: [updatedById], references: [id], onDelete: SetNull)
+  fields       CustomFieldDefinition[]
+  records      CustomModuleRecord[]
+  entityData   CustomEntityData[]
+
+  @@unique([organizationId, key])
+  @@unique([organizationId, systemKey])
+  @@index([organizationId, status])
+  @@index([organizationId, kind])
+  @@map("module_definitions")
+}
+
+model CustomFieldDefinition {
+  id             String          @id @default(cuid())
+  moduleId       String
+  key            String
+  label          String
+  description    String?
+  placeholder    String?
+  type           CustomFieldType
+  isRequired     Boolean         @default(false)
+  isVisible      Boolean         @default(true)
+  isLocked       Boolean         @default(false)
+  isSystem       Boolean         @default(false)
+  systemFieldKey String?
+  options        Json?
+  defaultValue   Json?
+  validation     Json?
+  sortOrder      Int             @default(0)
+  archivedAt     DateTime?
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+
+  module ModuleDefinition @relation(fields: [moduleId], references: [id], onDelete: Cascade)
+
+  @@unique([moduleId, key])
+  @@index([moduleId, sortOrder])
+  @@index([moduleId, archivedAt])
+  @@map("custom_field_definitions")
+}
+
+model CustomModuleRecord {
+  id             String   @id @default(cuid())
+  organizationId String
+  moduleId       String
+  data           Json
+  createdById    String?
+  updatedById    String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  module       ModuleDefinition @relation(fields: [moduleId], references: [id], onDelete: Cascade)
+  createdBy    User?            @relation("CustomRecordCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  updatedBy    User?            @relation("CustomRecordUpdater", fields: [updatedById], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, moduleId, updatedAt])
+  @@index([createdById])
+  @@map("custom_module_records")
+}
+
+model CustomEntityData {
+  id             String   @id @default(cuid())
+  organizationId String
+  moduleId       String
+  entityId       String
+  data           Json
+  createdById    String?
+  updatedById    String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  module       ModuleDefinition @relation(fields: [moduleId], references: [id], onDelete: Cascade)
+  createdBy    User?            @relation("CustomDataCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  updatedBy    User?            @relation("CustomDataUpdater", fields: [updatedById], references: [id], onDelete: SetNull)
+
+  @@unique([moduleId, entityId])
+  @@index([organizationId, moduleId])
+  @@index([entityId])
+  @@map("custom_entity_data")
 }

@@ -75,6 +75,73 @@ const projectPriorityValues = ["low", "normal", "high", "critical", "LOW", "NORM
 const permissionKeySchema = z.string().trim().min(1).max(80);
 const projectTagsSchema = z.array(z.string().trim().min(1).max(40)).max(12);
 const workspaceDepartmentsSchema = z.array(z.string().trim().min(1).max(80)).max(40);
+const moduleRoleSchema = z.enum(roleValues);
+const moduleRolesSchema = z.array(moduleRoleSchema).max(6);
+const customFieldTypeSchema = z.enum([
+  "text",
+  "long_text",
+  "integer",
+  "decimal",
+  "boolean",
+  "date",
+  "datetime",
+  "email",
+  "phone",
+  "url",
+  "select",
+  "multi_select",
+  "user",
+  "TEXT",
+  "LONG_TEXT",
+  "INTEGER",
+  "DECIMAL",
+  "BOOLEAN",
+  "DATE",
+  "DATETIME",
+  "EMAIL",
+  "PHONE",
+  "URL",
+  "SELECT",
+  "MULTI_SELECT",
+  "USER",
+]);
+const customFieldOptionSchema = z.union([
+  z.string().trim().min(1).max(120),
+  z.object({
+    label: z.string().trim().min(1).max(120),
+    value: z.string().trim().min(1).max(120),
+  }),
+]);
+const customFieldBaseSchema = z.object({
+  defaultValue: z.unknown().optional(),
+  description: optionalTrimmedString(500),
+  isRequired: z.boolean(),
+  isVisible: z.boolean(),
+  key: z
+    .string()
+    .trim()
+    .min(1)
+    .max(64)
+    .regex(/^[a-z][a-z0-9_]*$/, "Field key must use lowercase letters, numbers, and underscores."),
+  label: z.string().trim().min(1, "Field label is required.").max(120),
+  options: z.array(customFieldOptionSchema).max(100).optional(),
+  placeholder: optionalTrimmedString(160),
+  sortOrder: z.coerce.number().int().min(0).max(1000).optional(),
+  type: customFieldTypeSchema,
+  validation: z
+    .object({
+      max: z.coerce.number().finite().optional(),
+      maxLength: z.coerce.number().int().positive().max(100000).optional(),
+      min: z.coerce.number().finite().optional(),
+      minLength: z.coerce.number().int().nonnegative().max(100000).optional(),
+    })
+    .optional(),
+});
+const customFieldInputSchema = customFieldBaseSchema.extend({
+  isRequired: z.boolean().default(false),
+  isVisible: z.boolean().default(true),
+});
+const customValuesSchema = z.record(z.string().max(64), z.unknown());
 
 const syncProfileSchema = z.object({
   contact: optionalTrimmedString(40),
@@ -87,6 +154,7 @@ const syncProfileSchema = z.object({
 
 const createOrganizationUserSchema = z.object({
   contact: optionalTrimmedString(40),
+  customFields: customValuesSchema.default({}),
   department: optionalTrimmedString(120),
   designation: optionalTrimmedString(120),
   email: z.string().trim().email("Enter a valid email address.").max(255),
@@ -97,6 +165,7 @@ const createOrganizationUserSchema = z.object({
 
 const updateOrganizationUserSchema = z.object({
   contact: optionalTrimmedString(40),
+  customFields: customValuesSchema.optional(),
   department: optionalTrimmedString(120),
   designation: optionalTrimmedString(120),
   email: z.string().trim().email("Enter a valid email address.").max(255).optional(),
@@ -110,6 +179,7 @@ const createProjectSchema = z
   .object({
     clientName: optionalTrimmedString(160),
     code: optionalTrimmedString(32),
+    customFields: customValuesSchema.default({}),
     department: optionalTrimmedString(120),
     description: optionalTrimmedString(5000),
     dueDate: optionalTrimmedString(40),
@@ -146,6 +216,7 @@ const createProjectSchema = z
 const updateProjectSchema = z.object({
   clientName: z.string().trim().max(160).optional(),
   code: z.string().trim().max(32).optional(),
+  customFields: customValuesSchema.optional(),
   department: z.string().trim().max(120).optional(),
   description: z.string().trim().max(5000).optional(),
   dueDate: z.string().trim().max(40).optional(),
@@ -162,6 +233,7 @@ const updateProjectSchema = z.object({
 const createTaskSchema = z.object({
   assignedToId: z.string().trim().min(1, "Choose an employee before creating the task."),
   category: z.string().trim().min(1, "Category is required.").max(80),
+  customFields: customValuesSchema.default({}),
   deadline: optionalTrimmedString(40),
   description: z.string().trim().min(1, "Description is required.").max(5000),
   estimatedHours: optionalNumber(999.99),
@@ -175,6 +247,7 @@ const createTaskSchema = z.object({
 const updateTaskSchema = z.object({
   assignedToId: optionalNullableId,
   category: z.string().trim().min(1, "Category is required.").max(80).optional(),
+  customFields: customValuesSchema.optional(),
   deadline: z.string().trim().max(40).optional(),
   description: z.string().trim().min(1, "Description is required.").max(5000).optional(),
   estimatedHours: optionalNullableNumber(999.99),
@@ -193,6 +266,7 @@ const createTimeLogSchema = z.object({
 
 const createAttendanceScanSchema = z.object({
   accuracyMeters: optionalNumber(9999),
+  customFields: customValuesSchema.default({}),
   direction: z.enum(["in", "out", "IN", "OUT"]),
   latitude: optionalBoundedNumber(-90, 90),
   longitude: optionalBoundedNumber(-180, 180),
@@ -211,6 +285,7 @@ const updateUserRoleSchema = z.object({
 
 const updateCurrentProfileSchema = z.object({
   contact: optionalTrimmedString(40),
+  customFields: customValuesSchema.optional(),
   department: optionalTrimmedString(120),
   designation: optionalTrimmedString(120),
   fullName: z.string().trim().min(1, "Full name is required.").max(120),
@@ -240,17 +315,61 @@ const updateWorkspaceSettingsSchema = z
     }
   });
 
+const createModuleSchema = z.object({
+  createRoles: moduleRolesSchema.default(roleValues.slice(0, 6)),
+  deleteRoles: moduleRolesSchema.default(["super_admin", "admin"]),
+  description: optionalTrimmedString(500),
+  editRoles: moduleRolesSchema.default(roleValues.slice(0, 6)),
+  fields: z.array(customFieldInputSchema).min(1, "Add at least one field.").max(100),
+  icon: optionalTrimmedString(40),
+  key: z
+    .string()
+    .trim()
+    .min(2)
+    .max(48)
+    .regex(/^[a-z][a-z0-9-]*$/, "Module key must use lowercase letters, numbers, and hyphens."),
+  pluralName: z.string().trim().min(1, "Plural module name is required.").max(80),
+  singularName: z.string().trim().min(1, "Module name is required.").max(80),
+  viewRoles: moduleRolesSchema.default(roleValues.slice(0, 6)),
+});
+
+const updateModuleSchema = z.object({
+  createRoles: moduleRolesSchema.optional(),
+  deleteRoles: moduleRolesSchema.optional(),
+  description: z.string().trim().max(500).optional(),
+  editRoles: moduleRolesSchema.optional(),
+  icon: z.string().trim().min(1).max(40).optional(),
+  pluralName: z.string().trim().min(1).max(80).optional(),
+  primaryFieldId: z.string().trim().min(1).max(80).nullable().optional(),
+  singularName: z.string().trim().min(1).max(80).optional(),
+  status: z.enum(["active", "archived", "ACTIVE", "ARCHIVED"]).optional(),
+  viewRoles: moduleRolesSchema.optional(),
+});
+
+const updateCustomFieldSchema = customFieldBaseSchema.partial().extend({
+  archived: z.boolean().optional(),
+});
+
+const customRecordSchema = z.object({
+  values: customValuesSchema.default({}),
+});
+
 const parseBody = (schema, body) => schema.parse(body || {});
 
 module.exports = {
   createAttendanceScanSchema,
+  createModuleSchema,
   createOrganizationUserSchema,
   createProjectSchema,
   createTaskSchema,
   createTimeLogSchema,
+  customFieldInputSchema,
+  customRecordSchema,
   parseBody,
   syncProfileSchema,
   updateCurrentProfileSchema,
+  updateCustomFieldSchema,
+  updateModuleSchema,
   updateOrganizationUserSchema,
   updateProjectSchema,
   updateTaskSchema,
