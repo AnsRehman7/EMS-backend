@@ -41,6 +41,7 @@ const env = {
   allowClientRoleSelection: toBoolean(process.env.ALLOW_CLIENT_ROLE_SELECTION, false),
   bootstrapAdminEmails: csv(process.env.BOOTSTRAP_ADMIN_EMAILS),
   corsOrigins: csvValues(process.env.CORS_ORIGIN || "http://localhost:5173"),
+  cronSecret: process.env.CRON_SECRET,
   databaseUrl:
     process.env.DATABASE_URL || "postgresql://postgres:postgre@localhost:5432/postgres?schema=public",
   firebaseClientEmail: process.env.FIREBASE_CLIENT_EMAIL,
@@ -58,7 +59,11 @@ const env = {
   officeLatitude: toNumber(process.env.OFFICE_LATITUDE),
   officeLongitude: toNumber(process.env.OFFICE_LONGITUDE),
   officeRadiusMeters: toNumber(process.env.OFFICE_RADIUS_METERS, 100),
+  outboxBatchSize: toNumber(process.env.OUTBOX_BATCH_SIZE, 25),
   port: Number(process.env.PORT || 4000),
+  rateLimitMax: toNumber(process.env.RATE_LIMIT_MAX, 180),
+  authRateLimitMax: toNumber(process.env.AUTH_RATE_LIMIT_MAX, 30),
+  requireAppCheck: toBoolean(process.env.REQUIRE_FIREBASE_APP_CHECK, false),
 };
 
 const validateEnv = () => {
@@ -81,8 +86,16 @@ const validateEnv = () => {
     console.warn("[env] Firebase Admin credentials are not set; using Firebase Auth REST fallback for local development.");
   }
 
+  if (env.nodeEnv === "production") {
+    if (!hasAdminCredential) missing.push("Firebase Admin credentials are required in production");
+    if (!process.env.DATABASE_URL) missing.push("DATABASE_URL");
+    if (env.corsOrigins.includes("*")) missing.push("CORS_ORIGIN cannot contain * in production");
+  }
+
   if (missing.length) {
-    console.warn(`[env] Missing runtime config for authenticated routes: ${missing.join(", ")}`);
+    const message = `[env] Missing or unsafe runtime config: ${missing.join(", ")}`;
+    if (env.nodeEnv === "production") throw new Error(message);
+    console.warn(message);
   }
 };
 

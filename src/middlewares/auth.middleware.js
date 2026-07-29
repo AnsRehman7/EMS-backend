@@ -1,4 +1,5 @@
-const { firebaseAuth } = require("../config/firebaseAdmin");
+const { firebaseAppCheck, firebaseAuth } = require("../config/firebaseAdmin");
+const { env } = require("../config/env");
 const prisma = require("../db/prisma");
 const ApiError = require("../utils/apiError");
 
@@ -23,7 +24,7 @@ const authenticateFirebase = async (req, _res, next) => {
       return next(error);
     }
 
-    next(new ApiError(401, "Invalid or expired authentication token.", error.message));
+    next(new ApiError(401, "Invalid or expired authentication token."));
   }
 };
 
@@ -51,7 +52,20 @@ const attachCurrentUser = async (req, _res, next) => {
   }
 };
 
-const authenticate = [authenticateFirebase, attachCurrentUser];
+const verifyAppCheck = async (req, _res, next) => {
+  if (!env.requireAppCheck) return next();
+  if (!firebaseAppCheck) return next(new ApiError(503, "Firebase App Check is required but unavailable."));
+  const token = String(req.headers["x-firebase-appcheck"] || "").trim();
+  if (!token) return next(new ApiError(401, "A valid app attestation token is required."));
+  try {
+    req.appCheck = await firebaseAppCheck.verifyToken(token);
+    return next();
+  } catch {
+    return next(new ApiError(401, "Invalid app attestation token."));
+  }
+};
+
+const authenticate = [authenticateFirebase, verifyAppCheck, attachCurrentUser];
 
 module.exports = {
   authenticate,

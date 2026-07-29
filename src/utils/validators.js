@@ -64,16 +64,48 @@ const taskStatusValues = [
   "open",
   "active",
   "in_progress",
+  "blocked",
   "completed",
   "NEW",
   "ACTIVE",
   "IN_PROGRESS",
+  "BLOCKED",
   "COMPLETED",
 ];
 
 const projectPriorityValues = ["low", "normal", "high", "critical", "LOW", "NORMAL", "HIGH", "CRITICAL"];
 const permissionKeySchema = z.string().trim().min(1).max(80);
 const projectTagsSchema = z.array(z.string().trim().min(1).max(40)).max(12);
+const skillsSchema = z.array(z.string().trim().min(1).max(80)).max(30);
+const isDateOnly = (value) => {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+};
+const normalizeRequirementKey = (value, index) =>
+  String(value || `REQ-${String(index + 1).padStart(3, "0")}`)
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 30);
+const secureUrlSchema = (message) =>
+  z.string().trim().url(message).max(2048).refine(
+    (value) => new URL(value).protocol === "https:",
+    "URL must use HTTPS.",
+  );
+const avatarUrlSchema = z.union([
+  z.literal(""),
+  secureUrlSchema("Avatar must be a valid URL."),
+]);
+const requirementInputSchema = z.object({
+  acceptanceCriteria: optionalTrimmedString(2000),
+  description: z.string().trim().min(1, "Requirement description is required.").max(5000),
+  key: optionalTrimmedString(30),
+  priority: z.enum(["must", "should", "could", "wont", "MUST", "SHOULD", "COULD", "WONT"]).default("must"),
+  source: optionalTrimmedString(40),
+  title: z.string().trim().min(1, "Requirement title is required.").max(160),
+});
 const workspaceDepartmentsSchema = z.array(z.string().trim().min(1).max(80)).max(40);
 const moduleRoleSchema = z.enum(roleValues);
 const moduleRolesSchema = z.array(moduleRoleSchema).max(6);
@@ -153,26 +185,32 @@ const syncProfileSchema = z.object({
 });
 
 const createOrganizationUserSchema = z.object({
+  avatarUrl: avatarUrlSchema.optional(),
   contact: optionalTrimmedString(40),
   customFields: customValuesSchema.default({}),
   department: optionalTrimmedString(120),
   designation: optionalTrimmedString(120),
   email: z.string().trim().email("Enter a valid email address.").max(255),
   fullName: z.string().trim().min(1, "Full name is required.").max(120),
-  password: z.string().min(6, "Password must be at least 6 characters.").max(128),
+  password: z.string().min(12, "Temporary passwords must be at least 12 characters.").max(128).optional(),
   role: z.enum(roleValues).default("employee"),
+  skills: skillsSchema.default([]),
+  weeklyCapacityHours: z.coerce.number().positive().max(168).default(40),
 });
 
 const updateOrganizationUserSchema = z.object({
+  avatarUrl: avatarUrlSchema.optional(),
   contact: optionalTrimmedString(40),
   customFields: customValuesSchema.optional(),
   department: optionalTrimmedString(120),
   designation: optionalTrimmedString(120),
   email: z.string().trim().email("Enter a valid email address.").max(255).optional(),
   fullName: optionalTrimmedString(120),
-  password: z.string().min(6, "Password must be at least 6 characters.").max(128).optional(),
+  password: z.string().min(12, "Passwords must be at least 12 characters.").max(128).optional(),
   role: z.enum(roleValues).optional(),
+  skills: skillsSchema.optional(),
   status: z.enum(["active", "suspended", "ACTIVE", "SUSPENDED"]).optional(),
+  weeklyCapacityHours: z.coerce.number().positive().max(168).optional(),
 });
 
 const createProjectSchema = z
@@ -189,18 +227,34 @@ const createProjectSchema = z
     objective: optionalTrimmedString(5000),
     ownerId: optionalTrimmedString(80),
     priority: z.enum(projectPriorityValues).default("normal"),
+    requirements: z.array(requirementInputSchema).max(40).default([]),
     startDate: optionalTrimmedString(40),
     status: z.enum(["planned", "active", "PLANNED", "ACTIVE"]).optional(),
     tags: projectTagsSchema.default([]),
   })
   .superRefine((project, context) => {
-    if (!project.generateTasksWithAi) return;
-
-    if (!project.description || project.description.length < 40) {
+    const requirementKeys = project.requirements.map((requirement, index) =>
+      normalizeRequirementKey(requirement.key, index),
+    );
+    if (new Set(requirementKeys).size !== requirementKeys.length) {
       context.addIssue({
         code: "custom",
-        message: "Add at least 40 characters of project requirements for AI task planning.",
-        path: ["description"],
+        message: "Requirement keys must be unique after normalization.",
+        path: ["requirements"],
+      });
+    }
+
+    if (!project.generateTasksWithAi) return;
+
+    const structuredRequirementLength = project.requirements.reduce(
+      (total, requirement) => total + requirement.title.length + requirement.description.length,
+      0,
+    );
+    if ((!project.description || project.description.length < 40) && structuredRequirementLength < 40) {
+      context.addIssue({
+        code: "custom",
+        message: "Add a detailed brief or structured requirements before generating a plan.",
+        path: [project.requirements.length ? "requirements" : "description"],
       });
     }
 
@@ -221,6 +275,7 @@ const updateProjectSchema = z.object({
   description: z.string().trim().max(5000).optional(),
   dueDate: z.string().trim().max(40).optional(),
   estimatedHours: optionalNullableNumber(999999.99),
+  expectedVersion: z.coerce.number().int().positive().optional(),
   name: optionalTrimmedString(160),
   objective: z.string().trim().max(5000).optional(),
   ownerId: optionalNullableId,
@@ -231,9 +286,10 @@ const updateProjectSchema = z.object({
 });
 
 const createTaskSchema = z.object({
-  assignedToId: z.string().trim().min(1, "Choose an employee before creating the task."),
+  assignedToId: optionalNullableId,
   category: z.string().trim().min(1, "Category is required.").max(80),
   customFields: customValuesSchema.default({}),
+  dependencyIds: z.array(z.string().trim().min(1).max(80)).max(30).default([]),
   deadline: optionalTrimmedString(40),
   description: z.string().trim().min(1, "Description is required.").max(5000),
   estimatedHours: optionalNumber(999.99),
@@ -241,6 +297,8 @@ const createTaskSchema = z.object({
   projectId: z.string().trim().min(1, "Choose a project before creating the task."),
   successCriteria: optionalTrimmedString(5000),
   status: z.enum(taskStatusValues).default("open"),
+  requiredSkills: skillsSchema.default([]),
+  riskLevel: z.enum(["low", "medium", "high", "critical", "LOW", "MEDIUM", "HIGH", "CRITICAL"]).default("low"),
   title: z.string().trim().min(1, "Task title is required.").max(160),
 });
 
@@ -248,12 +306,16 @@ const updateTaskSchema = z.object({
   assignedToId: optionalNullableId,
   category: z.string().trim().min(1, "Category is required.").max(80).optional(),
   customFields: customValuesSchema.optional(),
+  dependencyIds: z.array(z.string().trim().min(1).max(80)).max(30).optional(),
   deadline: z.string().trim().max(40).optional(),
   description: z.string().trim().min(1, "Description is required.").max(5000).optional(),
   estimatedHours: optionalNullableNumber(999.99),
+  expectedVersion: z.coerce.number().int().positive().optional(),
   priority: z.enum(["low", "normal", "high", "LOW", "NORMAL", "HIGH"]).optional(),
   projectId: z.string().trim().min(1, "Choose a valid project.").optional(),
   status: z.enum(taskStatusValues).optional(),
+  requiredSkills: skillsSchema.optional(),
+  riskLevel: z.enum(["low", "medium", "high", "critical", "LOW", "MEDIUM", "HIGH", "CRITICAL"]).optional(),
   successCriteria: z.string().trim().max(5000).optional(),
   title: z.string().trim().min(1, "Task title is required.").max(160).optional(),
 });
@@ -268,6 +330,7 @@ const createAttendanceScanSchema = z.object({
   accuracyMeters: optionalNumber(9999),
   customFields: customValuesSchema.default({}),
   direction: z.enum(["in", "out", "IN", "OUT"]),
+  challengeToken: z.string().trim().min(20).max(500).optional(),
   latitude: optionalBoundedNumber(-90, 90),
   longitude: optionalBoundedNumber(-180, 180),
   scannedAt: optionalTrimmedString(40),
@@ -276,6 +339,7 @@ const createAttendanceScanSchema = z.object({
 });
 
 const updateTaskStatusSchema = z.object({
+  expectedVersion: z.coerce.number().int().positive().optional(),
   status: z.enum(taskStatusValues),
 });
 
@@ -284,11 +348,74 @@ const updateUserRoleSchema = z.object({
 });
 
 const updateCurrentProfileSchema = z.object({
+  avatarUrl: avatarUrlSchema.optional(),
   contact: optionalTrimmedString(40),
   customFields: customValuesSchema.optional(),
   department: optionalTrimmedString(120),
   designation: optionalTrimmedString(120),
   fullName: z.string().trim().min(1, "Full name is required.").max(120),
+  skills: skillsSchema.optional(),
+  weeklyCapacityHours: z.coerce.number().positive().max(168).optional(),
+});
+
+const generateProjectPlanSchema = z.object({
+  manualBaselineMinutes: z.coerce.number().int().positive().max(10080).optional(),
+  requirements: z.array(requirementInputSchema).min(1).max(40).optional(),
+});
+
+const approveProjectPlanSchema = z.object({
+  assignmentOverrides: z.record(z.string().max(30), z.string().trim().max(80).nullable()).default({}),
+  manualBaselineMinutes: z.coerce.number().int().positive().max(10080).optional(),
+  reviewDurationSeconds: z.coerce.number().int().positive().max(86400).optional(),
+  useRecommendations: z.boolean().default(false),
+});
+
+const reviewProjectPlanSchema = z.object({
+  notes: optionalTrimmedString(2000),
+  reason: optionalTrimmedString(1000),
+});
+
+const createTaskCommentSchema = z.object({
+  body: z.string().trim().min(1, "Comment cannot be empty.").max(5000),
+  mentions: z.array(z.string().trim().min(1).max(80)).max(30).default([]),
+});
+
+const createTaskAttachmentSchema = z.object({
+  mimeType: optionalTrimmedString(160),
+  name: z.string().trim().min(1, "File name is required.").max(255),
+  sizeBytes: z.coerce.number().int().nonnegative().max(100_000_000).optional(),
+  url: secureUrlSchema("Attachment URL must be valid."),
+});
+
+const setTaskWatchingSchema = z.object({ watching: z.boolean() });
+
+const createPushSubscriptionSchema = z.object({
+  deviceName: optionalTrimmedString(120),
+  platform: z.enum(["web", "android", "ios", "WEB", "ANDROID", "IOS"]),
+  token: z.string().trim().min(20).max(4096),
+});
+
+const createOfficeSchema = z.object({
+  address: optionalTrimmedString(300),
+  latitude: z.coerce.number().min(-90).max(90),
+  longitude: z.coerce.number().min(-180).max(180),
+  maxAccuracyMeters: z.coerce.number().int().min(10).max(1000).default(100),
+  name: z.string().trim().min(1, "Office name is required.").max(120),
+  radiusMeters: z.coerce.number().int().min(20).max(5000).default(100),
+});
+
+const updateOfficeSchema = createOfficeSchema.partial().extend({ isActive: z.boolean().optional() });
+
+const createAttendanceCorrectionSchema = z.object({
+  direction: z.enum(["in", "out", "IN", "OUT"]),
+  reason: z.string().trim().min(10, "Explain why this correction is needed.").max(2000),
+  requestedAt: z.string().trim().min(1).max(40),
+  scanId: optionalTrimmedString(80),
+});
+
+const reviewAttendanceCorrectionSchema = z.object({
+  reviewNote: optionalTrimmedString(1000),
+  status: z.enum(["approved", "rejected", "APPROVED", "REJECTED"]),
 });
 
 const updateUserPermissionsSchema = z.object({
@@ -299,9 +426,14 @@ const updateUserPermissionsSchema = z.object({
 const updateWorkspaceSettingsSchema = z
   .object({
     departments: workspaceDepartmentsSchema.optional(),
+    holidays: z
+      .array(z.string().refine(isDateOnly, "Holiday dates must be valid and use YYYY-MM-DD."))
+      .max(200)
+      .optional(),
     name: z.string().trim().min(2, "Workspace name must contain at least 2 characters.").max(160).optional(),
     timezone: z.string().trim().min(1).max(80).optional(),
     weekStartsOn: z.coerce.number().int().min(0).max(6).optional(),
+    workingDays: z.array(z.coerce.number().int().min(0).max(6)).min(1).max(7).optional(),
     workdayEnd: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Use HH:mm for the workday end.").optional(),
     workdayStart: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Use HH:mm for the workday start.").optional(),
   })
@@ -312,6 +444,31 @@ const updateWorkspaceSettingsSchema = z
         message: "Workday end must be later than workday start.",
         path: ["workdayEnd"],
       });
+    }
+    if (settings.workingDays && new Set(settings.workingDays).size !== settings.workingDays.length) {
+      context.addIssue({
+        code: "custom",
+        message: "Working days cannot contain duplicates.",
+        path: ["workingDays"],
+      });
+    }
+    if (settings.holidays && new Set(settings.holidays).size !== settings.holidays.length) {
+      context.addIssue({
+        code: "custom",
+        message: "Holiday dates cannot contain duplicates.",
+        path: ["holidays"],
+      });
+    }
+    if (settings.timezone) {
+      try {
+        new Intl.DateTimeFormat("en", { timeZone: settings.timezone }).format();
+      } catch {
+        context.addIssue({
+          code: "custom",
+          message: "Choose a valid IANA timezone, such as Asia/Karachi.",
+          path: ["timezone"],
+        });
+      }
     }
   });
 
@@ -357,20 +514,31 @@ const customRecordSchema = z.object({
 const parseBody = (schema, body) => schema.parse(body || {});
 
 module.exports = {
+  approveProjectPlanSchema,
+  createAttendanceCorrectionSchema,
   createAttendanceScanSchema,
   createModuleSchema,
   createOrganizationUserSchema,
+  createOfficeSchema,
   createProjectSchema,
+  createPushSubscriptionSchema,
   createTaskSchema,
+  createTaskAttachmentSchema,
+  createTaskCommentSchema,
   createTimeLogSchema,
   customFieldInputSchema,
   customRecordSchema,
+  generateProjectPlanSchema,
   parseBody,
+  reviewAttendanceCorrectionSchema,
+  reviewProjectPlanSchema,
+  setTaskWatchingSchema,
   syncProfileSchema,
   updateCurrentProfileSchema,
   updateCustomFieldSchema,
   updateModuleSchema,
   updateOrganizationUserSchema,
+  updateOfficeSchema,
   updateProjectSchema,
   updateTaskSchema,
   updateTaskStatusSchema,

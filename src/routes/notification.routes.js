@@ -6,6 +6,8 @@ const router = express.Router();
 
 router.use(authenticate);
 router.get("/", notificationController.listNotifications);
+router.post("/subscriptions", notificationController.registerPushSubscription);
+router.delete("/subscriptions", notificationController.unregisterPushSubscription);
 router.patch("/read-all", notificationController.markAllNotificationsRead);
 router.patch("/:notificationId/read", notificationController.markNotificationRead);
 

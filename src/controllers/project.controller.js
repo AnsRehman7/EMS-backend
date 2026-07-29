@@ -3,8 +3,8 @@ const asyncHandler = require("../utils/asyncHandler");
 const { createProjectSchema, parseBody, updateProjectSchema } = require("../utils/validators");
 
 const listProjects = asyncHandler(async (req, res) => {
-  const projects = await projectService.listProjects(req.user);
-  res.status(200).json({ data: { projects } });
+  const result = await projectService.listProjects(req.user, req.query);
+  res.status(200).json({ data: result });
 });
 
 const getProjectById = asyncHandler(async (req, res) => {

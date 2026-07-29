@@ -11,6 +11,11 @@ router.use(authenticate);
 router.get("/", taskController.listTasks);
 router.get("/stats", taskController.getTaskStats);
 router.get("/:taskId/activity", taskController.getTaskActivity);
+router.get("/:taskId/comments", taskController.listTaskComments);
+router.post("/:taskId/comments", taskController.createTaskComment);
+router.get("/:taskId/attachments", taskController.listTaskAttachments);
+router.post("/:taskId/attachments", taskController.createTaskAttachment);
+router.patch("/:taskId/watching", taskController.setTaskWatching);
 router.get("/:taskId", taskController.getTaskById);
 router.post(
   "/",

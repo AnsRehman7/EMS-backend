@@ -232,6 +232,7 @@ const serializeModule = (module, currentUser) => ({
   kind: String(module.kind).toLowerCase(),
   pluralName: module.pluralName,
   primaryFieldId: module.primaryFieldId || "",
+  schemaVersion: module.schemaVersion || 1,
   singularName: module.singularName,
   status: String(module.status).toLowerCase(),
   systemKey: module.systemKey || "",
@@ -435,6 +436,7 @@ const updateModule = async (currentUser, moduleId, payload) => {
   }
 
   const data = {
+    schemaVersion: { increment: 1 },
     updatedById: currentUser.id,
   };
   ["description", "icon", "pluralName", "primaryFieldId", "singularName"].forEach((key) => {
@@ -477,7 +479,7 @@ const createField = async (currentUser, moduleId, payload) => {
   }
 
   await prisma.moduleDefinition.update({
-    data: { updatedById: currentUser.id },
+    data: { schemaVersion: { increment: 1 }, updatedById: currentUser.id },
     where: { id: module.id },
   });
   await safelyRecordAudit({
@@ -599,7 +601,7 @@ const updateField = async (currentUser, moduleId, fieldId, payload) => {
     where: { id: existing.id },
   });
   await prisma.moduleDefinition.update({
-    data: { updatedById: currentUser.id },
+    data: { schemaVersion: { increment: 1 }, updatedById: currentUser.id },
     where: { id: module.id },
   });
   await safelyRecordAudit({
@@ -760,6 +762,7 @@ const serializeRecord = (record, module) => {
       : null,
     displayName: isMissing(displayValue) ? `${module.singularName} record` : String(displayValue),
     id: record.id,
+    schemaVersion: record.schemaVersion || 1,
     updatedAt: record.updatedAt,
     updatedBy: record.updatedBy
       ? { id: record.updatedBy.id, name: record.updatedBy.fullName }
@@ -780,15 +783,52 @@ const getCustomModule = async (currentUser, moduleKey, action = "view") => {
   return module;
 };
 
-const listRecords = async (currentUser, moduleKey) => {
+const listRecords = async (currentUser, moduleKey, filters = {}) => {
   const module = await getCustomModule(currentUser, moduleKey, "view");
+  const page = Math.max(1, Number(filters.page) || 1);
+  const limit = Math.max(1, Math.min(Number(filters.limit) || 50, 100));
+  const skip = (page - 1) * limit;
+  const search = String(filters.search || "").trim();
+  let recordIds = null;
+  let total;
+  if (search) {
+    const pattern = `%${search}%`;
+    const [rows, countRows] = await Promise.all([
+      prisma.$queryRaw`
+        SELECT id FROM "custom_module_records"
+        WHERE "moduleId" = ${module.id}
+          AND "organizationId" = ${currentUser.organizationId}
+          AND CAST(data AS TEXT) ILIKE ${pattern}
+        ORDER BY "updatedAt" DESC
+        LIMIT ${limit} OFFSET ${skip}
+      `,
+      prisma.$queryRaw`
+        SELECT COUNT(*)::int AS count FROM "custom_module_records"
+        WHERE "moduleId" = ${module.id}
+          AND "organizationId" = ${currentUser.organizationId}
+          AND CAST(data AS TEXT) ILIKE ${pattern}
+      `,
+    ]);
+    recordIds = rows.map((row) => row.id);
+    total = Number(countRows[0]?.count || 0);
+  } else {
+    total = await prisma.customModuleRecord.count({
+      where: { moduleId: module.id, organizationId: currentUser.organizationId },
+    });
+  }
   const records = await prisma.customModuleRecord.findMany({
     include: customRecordInclude,
     orderBy: { updatedAt: "desc" },
-    where: { moduleId: module.id, organizationId: currentUser.organizationId },
+    ...(recordIds ? {} : { skip, take: limit }),
+    where: {
+      moduleId: module.id,
+      organizationId: currentUser.organizationId,
+      ...(recordIds ? { id: { in: recordIds } } : {}),
+    },
   });
   return {
     module: serializeModule(module, currentUser),
+    pagination: { limit, page, pages: Math.max(1, Math.ceil(total / limit)), total },
     records: records.map((record) => serializeRecord(record, module)),
   };
 };
@@ -812,6 +852,7 @@ const createRecord = async (currentUser, moduleKey, values) => {
       data,
       moduleId: module.id,
       organizationId: currentUser.organizationId,
+      schemaVersion: module.schemaVersion || 1,
       updatedById: currentUser.id,
     },
     include: customRecordInclude,
@@ -835,7 +876,7 @@ const updateRecord = async (currentUser, moduleKey, recordId, values) => {
   if (!existing) throw new ApiError(404, `${module.singularName} record not found.`);
   const data = await validateValues(module, values, currentUser, existing.data || {});
   const record = await prisma.customModuleRecord.update({
-    data: { data, updatedById: currentUser.id },
+    data: { data, schemaVersion: module.schemaVersion || 1, updatedById: currentUser.id },
     include: customRecordInclude,
     where: { id: existing.id },
   });
@@ -922,13 +963,14 @@ const saveSystemEntityData = async ({
   const row = await prisma.customEntityData.upsert({
     create: {
       createdById: currentUser.id,
-      data,
+    data,
       entityId,
       moduleId: module.id,
       organizationId: currentUser.organizationId,
+      schemaVersion: module.schemaVersion || 1,
       updatedById: currentUser.id,
     },
-    update: { data, updatedById: currentUser.id },
+    update: { data, schemaVersion: module.schemaVersion || 1, updatedById: currentUser.id },
     where: { moduleId_entityId: { entityId, moduleId: module.id } },
   });
   const changes = recordChangeSet(existing?.data || {}, row.data || {}, customFields);

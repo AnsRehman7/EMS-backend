@@ -5,7 +5,13 @@ const { serializeAuditLog } = require("./audit.service");
 const DAY_MS = 86_400_000;
 const toNumber = (value) => (value === null || value === undefined ? 0 : Number(value));
 const percent = (value, total) => (total > 0 ? Math.round((value / total) * 100) : 0);
-const dateKey = (value) => new Date(value).toISOString().slice(0, 10);
+const dateKey = (value, timeZone = "UTC") =>
+  new Intl.DateTimeFormat("en-CA", {
+    day: "2-digit",
+    month: "2-digit",
+    timeZone,
+    year: "numeric",
+  }).format(new Date(value));
 
 const startOfDay = (value = new Date()) => {
   const date = new Date(value);
@@ -13,14 +19,30 @@ const startOfDay = (value = new Date()) => {
   return date;
 };
 
-const getWorkingDays = (start, end) => {
+const getWorkingDays = (start, end, organization = {}) => {
   let count = 0;
   const cursor = new Date(start);
+  const workingDays = new Set(organization.workingDays?.length ? organization.workingDays : [1, 2, 3, 4, 5]);
+  const holidays = new Set(organization.holidays || []);
   while (cursor < end) {
-    if (![0, 6].includes(cursor.getDay())) count += 1;
+    const key = dateKey(cursor, organization.timezone || "UTC");
+    const weekday = new Date(`${key}T00:00:00.000Z`).getUTCDay();
+    if (workingDays.has(weekday) && !holidays.has(key)) {
+      count += 1;
+    }
     cursor.setDate(cursor.getDate() + 1);
   }
   return count;
+};
+
+const averageMetric = (rows, key) => {
+  const values = rows
+    .map((row) => row?.[key])
+    .filter((value) => value !== null && value !== undefined && Number.isFinite(Number(value)))
+    .map(Number);
+  return values.length
+    ? Math.round((values.reduce((sum, value) => sum + value, 0) / values.length) * 100) / 100
+    : null;
 };
 
 const getProjectProgress = (project) => {
@@ -47,7 +69,7 @@ const getOverviewReport = async (currentUser, requestedDays = 30) => {
   const start = startOfDay(new Date(end.getTime() - (days - 1) * DAY_MS));
   const today = startOfDay(end);
 
-  const [organization, users, tasks, projects, scans, auditEntries] = await Promise.all([
+  const [organization, users, tasks, projects, scans, auditEntries, projectPlans] = await Promise.all([
     prisma.organization.findUnique({ where: { id: currentUser.organizationId } }),
     prisma.user.findMany({
       orderBy: { fullName: "asc" },
@@ -59,7 +81,7 @@ const getOverviewReport = async (currentUser, requestedDays = 30) => {
         project: { select: { name: true } },
         timeLogs: { where: { loggedAt: { gte: start } } },
       },
-      where: { organizationId: currentUser.organizationId },
+      where: { deletedAt: null, organizationId: currentUser.organizationId },
     }),
     prisma.project.findMany({
       include: {
@@ -68,11 +90,11 @@ const getOverviewReport = async (currentUser, requestedDays = 30) => {
           select: { aiProgress: true, projectWeight: true, status: true },
         },
       },
-      where: { organizationId: currentUser.organizationId },
+      where: { deletedAt: null, organizationId: currentUser.organizationId },
     }),
     prisma.attendanceScan.findMany({
-      select: { scannedAt: true, userId: true },
-      where: { accepted: true, organizationId: currentUser.organizationId, scannedAt: { gte: start } },
+      select: { direction: true, scannedAt: true, userId: true },
+      where: { accepted: true, direction: "IN", organizationId: currentUser.organizationId, scannedAt: { gte: start } },
     }),
     prisma.auditLog.findMany({
       include: { actor: { select: { fullName: true, id: true, role: true } } },
@@ -80,7 +102,21 @@ const getOverviewReport = async (currentUser, requestedDays = 30) => {
       take: 8,
       where: { organizationId: currentUser.organizationId },
     }),
+    prisma.projectPlan.findMany({
+      include: {
+        evaluations: { orderBy: { evaluatedAt: "desc" }, where: { evaluatedAt: { gte: start } } },
+        project: { select: { name: true } },
+      },
+      orderBy: { createdAt: "desc" },
+      take: 100,
+      where: {
+        OR: [{ createdAt: { gte: start } }, { evaluations: { some: { evaluatedAt: { gte: start } } } }],
+        organizationId: currentUser.organizationId,
+      },
+    }),
   ]);
+  const timeZone = organization?.timezone || "UTC";
+  const keyFor = (value) => dateKey(value, timeZone);
 
   const activeTasks = tasks.filter((task) => task.status !== "COMPLETED");
   const completedTasks = tasks.filter((task) => task.status === "COMPLETED");
@@ -96,28 +132,25 @@ const getOverviewReport = async (currentUser, requestedDays = 30) => {
     status: String(project.status).toLowerCase(),
   }));
   const atRiskProjects = projectRows.filter((project) => project.health === "at_risk");
-  const todayPresent = new Set(scans.filter((scan) => dateKey(scan.scannedAt) === dateKey(today)).map((scan) => scan.userId));
+  const todayPresent = new Set(scans.filter((scan) => keyFor(scan.scannedAt) === keyFor(today)).map((scan) => scan.userId));
   const loggedHours = tasks.reduce(
     (total, task) => total + task.timeLogs.reduce((taskTotal, log) => taskTotal + toNumber(log.hours), 0),
     0,
   );
-  const workdayHours = organization
-    ? Math.max(
-        1,
-        (Number(organization.workdayEnd.slice(0, 2)) * 60 + Number(organization.workdayEnd.slice(3)) -
-          (Number(organization.workdayStart.slice(0, 2)) * 60 + Number(organization.workdayStart.slice(3)))) /
-          60,
-      )
-    : 8;
-  const availableHours = users.length * getWorkingDays(start, end) * workdayHours;
+  const windowWorkingDays = getWorkingDays(start, end, organization);
+  const workingDaysPerWeek = Math.max(1, new Set(organization?.workingDays?.length ? organization.workingDays : [1, 2, 3, 4, 5]).size);
+  const availableHours = users.reduce(
+    (sum, user) => sum + (toNumber(user.weeklyCapacityHours) * windowWorkingDays) / workingDaysPerWeek,
+    0,
+  );
 
   const timeline = Array.from({ length: days }, (_, index) => {
     const date = new Date(start.getTime() + index * DAY_MS);
-    const key = dateKey(date);
-    const present = new Set(scans.filter((scan) => dateKey(scan.scannedAt) === key).map((scan) => scan.userId)).size;
+    const key = keyFor(date);
+    const present = new Set(scans.filter((scan) => keyFor(scan.scannedAt) === key).map((scan) => scan.userId)).size;
     return {
-      completed: completedTasks.filter((task) => task.completedAt && dateKey(task.completedAt) === key).length,
-      created: tasks.filter((task) => dateKey(task.createdAt) === key).length,
+      completed: completedTasks.filter((task) => task.completedAt && keyFor(task.completedAt) === key).length,
+      created: tasks.filter((task) => keyFor(task.createdAt) === key).length,
       date: key,
       label: new Intl.DateTimeFormat("en", { day: "numeric", month: "short" }).format(date),
       present,
@@ -141,7 +174,10 @@ const getOverviewReport = async (currentUser, requestedDays = 30) => {
         overdueTasks: memberTasks.filter((task) => task.deadline && new Date(task.deadline) < today).length,
         plannedHours,
         role: String(member.role).toLowerCase(),
-        utilization: Math.min(100, percent(plannedHours, workdayHours * 5)),
+        utilization: Math.min(
+          100,
+          percent(plannedHours, (toNumber(member.weeklyCapacityHours) * windowWorkingDays) / workingDaysPerWeek),
+        ),
       };
     })
     .sort((a, b) => b.activeTasks - a.activeTasks)
@@ -165,7 +201,7 @@ const getOverviewReport = async (currentUser, requestedDays = 30) => {
     })
     .sort((a, b) => b.members - a.members);
 
-  const taskStatuses = ["NEW", "ACTIVE", "IN_PROGRESS", "COMPLETED"].map((status) => ({
+  const taskStatuses = ["NEW", "ACTIVE", "IN_PROGRESS", "BLOCKED", "COMPLETED"].map((status) => ({
     key: status === "NEW" ? "open" : status.toLowerCase(),
     value: tasks.filter((task) => task.status === status).length,
   }));
@@ -173,6 +209,36 @@ const getOverviewReport = async (currentUser, requestedDays = 30) => {
     key: health,
     value: projectRows.filter((project) => project.health === health).length,
   }));
+  const planEvaluations = projectPlans.flatMap((plan) =>
+    plan.evaluations.map((evaluation) => ({
+      evaluatedAt: evaluation.evaluatedAt,
+      id: evaluation.id,
+      metrics: evaluation.metrics && typeof evaluation.metrics === "object" ? evaluation.metrics : {},
+      planId: plan.id,
+      planVersion: plan.version,
+      projectId: plan.projectId,
+      projectName: plan.project.name,
+    })),
+  );
+  const evaluationMetrics = planEvaluations.map((evaluation) => evaluation.metrics);
+  const generatedPlans = projectPlans.filter((plan) => plan.createdAt >= start);
+  const planningResearch = {
+    approvalRate: percent(generatedPlans.filter((plan) => plan.status === "APPROVED").length, generatedPlans.length),
+    averageDependencyViolations: averageMetric(evaluationMetrics, "dependencyViolations"),
+    averageEffortMeanAbsoluteError: averageMetric(evaluationMetrics, "effortMeanAbsoluteError"),
+    averageGenerationSeconds: averageMetric(evaluationMetrics, "generationSeconds"),
+    averageManagerOverrideRate: averageMetric(evaluationMetrics, "managerOverrideRate"),
+    averagePlanningTimeSavedMinutes: averageMetric(evaluationMetrics, "planningTimeSavedMinutes"),
+    averageRequirementCoverage: averageMetric(evaluationMetrics, "requirementCoverage"),
+    averageScheduleViolations: averageMetric(evaluationMetrics, "scheduleViolations"),
+    deterministicFallbackRate: percent(
+      generatedPlans.filter((plan) => plan.model === "staffflow-deterministic-v1").length,
+      generatedPlans.length,
+    ),
+    evaluatedPlans: new Set(planEvaluations.map((evaluation) => evaluation.planId)).size,
+    evaluations: planEvaluations,
+    generatedPlans: generatedPlans.length,
+  };
 
   return {
     attention: {
@@ -190,6 +256,7 @@ const getOverviewReport = async (currentUser, requestedDays = 30) => {
     },
     departments,
     period: { days, end, start },
+    planningResearch,
     projectHealth,
     recentActivity: auditEntries.map(serializeAuditLog),
     summary: {
@@ -211,5 +278,7 @@ const getOverviewReport = async (currentUser, requestedDays = 30) => {
 };
 
 module.exports = {
+  averageMetric,
+  getWorkingDays,
   getOverviewReport,
 };

@@ -11,5 +11,11 @@
       "src": "/(.*)",
       "dest": "index.js"
     }
+  ],
+  "crons": [
+    {
+      "path": "/internal/outbox/process",
+      "schedule": "0 0 * * *"
+    }
   ]
 }

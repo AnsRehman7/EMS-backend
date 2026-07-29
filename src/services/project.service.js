@@ -2,13 +2,12 @@ const prisma = require("../db/prisma");
 const ApiError = require("../utils/apiError");
 const { hasPermission, PERMISSIONS } = require("../utils/permissions");
 const { calculateWeightedProjectProgress } = require("./analysis.service");
-const { generateProjectTaskPlan } = require("./projectPlanning.service");
+const { generatePlan } = require("./planning.service");
 const { notifyProjectActivity, safelyNotify } = require("./notification.service");
 const { buildChangeSet, listEntityActivity, safelyRecordAudit } = require("./audit.service");
 const { serializeTask, taskInclude } = require("./task.service");
 const {
   attachSystemCustomData,
-  deleteSystemEntityData,
   getSystemEntityData,
   saveSystemEntityData,
   validateSystemCustomValues,
@@ -23,6 +22,13 @@ const normalizeProjectCode = (code = "") =>
     .toUpperCase()
     .replace(/\s+/g, "-");
 const toNumber = (value) => (value === null || value === undefined ? 0 : Number(value));
+const requirementKey = (value, index) =>
+  String(value || `REQ-${String(index + 1).padStart(3, "0")}`)
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 30);
 
 const parseDate = (value, label) => {
   if (!value) return null;
@@ -42,14 +48,14 @@ const assertPermission = (currentUser, permission) => {
 };
 
 const getProjectAccessWhere = (currentUser) => {
-  const organizationWhere = { organizationId: currentUser.organizationId };
+  const organizationWhere = { deletedAt: null, organizationId: currentUser.organizationId };
   if (hasPermission(currentUser, PERMISSIONS.PROJECTS_VIEW_ALL)) return organizationWhere;
-  return { ...organizationWhere, tasks: { some: { assignedToId: currentUser.id } } };
+  return { ...organizationWhere, tasks: { some: { assignedToId: currentUser.id, deletedAt: null } } };
 };
 
 const getTaskScopeWhere = (currentUser) => {
-  if (hasPermission(currentUser, PERMISSIONS.PROJECTS_VIEW_ALL)) return undefined;
-  return { assignedToId: currentUser.id };
+  if (hasPermission(currentUser, PERMISSIONS.PROJECTS_VIEW_ALL)) return { deletedAt: null };
+  return { assignedToId: currentUser.id, deletedAt: null };
 };
 
 const validateProjectDates = (startDate, dueDate) => {
@@ -161,23 +167,56 @@ const serializeProject = (project, { includeTasks = false } = {}) => {
     ownerName: project.owner?.fullName || project.createdBy?.fullName || "Unassigned",
     priority: String(project.priority || "NORMAL").toLowerCase(),
     progress,
+    requirements: (project.requirements || []).map((requirement) => ({
+      acceptanceCriteria: requirement.acceptanceCriteria || "",
+      description: requirement.description,
+      id: requirement.id,
+      key: requirement.key,
+      priority: String(requirement.priority).toLowerCase(),
+      title: requirement.title,
+    })),
+    latestPlan: project.plans?.[0]
+      ? {
+          id: project.plans[0].id,
+          metrics: project.plans[0].metrics || {},
+          status: String(project.plans[0].status).toLowerCase(),
+          version: project.plans[0].version,
+          warnings: project.plans[0].warnings || [],
+        }
+      : null,
     startDate: project.startDate ? project.startDate.toISOString().slice(0, 10) : "",
     status,
     tags: project.tags || [],
     taskCount,
     totalLoggedHours,
     updatedAt: project.updatedAt,
+    version: project.version || 1,
     ...(includeTasks ? { tasks: tasks.map(serializeTask) } : {}),
   };
 };
 
-const listProjects = async (currentUser) => {
+const listProjects = async (currentUser, filters = {}) => {
   const taskScope = getTaskScopeWhere(currentUser);
-
-  const projects = await prisma.project.findMany({
+  const page = Math.max(1, Number(filters.page) || 1);
+  const limit = Math.max(1, Math.min(Number(filters.limit) || 50, 100));
+  const status = filters.status && filters.status !== "all" ? normalizeProjectStatus(filters.status) : undefined;
+  const priority = filters.priority && filters.priority !== "all" ? normalizeProjectPriority(filters.priority) : undefined;
+  const search = String(filters.search || "").trim();
+  const where = {
+    ...getProjectAccessWhere(currentUser),
+    ...(status ? { status } : {}),
+    ...(priority ? { priority } : {}),
+    ...(filters.ownerId ? { ownerId: filters.ownerId } : {}),
+    ...(search
+      ? { OR: [{ name: { contains: search, mode: "insensitive" } }, { description: { contains: search, mode: "insensitive" } }] }
+      : {}),
+  };
+  const [projects, total] = await Promise.all([prisma.project.findMany({
     include: {
       createdBy: true,
       owner: true,
+      plans: { orderBy: { version: "desc" }, take: 1 },
+      requirements: { orderBy: { key: "asc" } },
       tasks: {
         orderBy: { createdAt: "desc" },
         select: {
@@ -194,10 +233,15 @@ const listProjects = async (currentUser) => {
       },
     },
     orderBy: [{ status: "asc" }, { dueDate: "asc" }, { createdAt: "desc" }],
-    where: getProjectAccessWhere(currentUser),
-  });
+    skip: (page - 1) * limit,
+    take: limit,
+    where,
+  }), prisma.project.count({ where })]);
 
-  return attachSystemCustomData(currentUser, "projects", projects.map((project) => serializeProject(project)));
+  return {
+    pagination: { limit, page, pages: Math.max(1, Math.ceil(total / limit)), total },
+    projects: await attachSystemCustomData(currentUser, "projects", projects.map((project) => serializeProject(project))),
+  };
 };
 
 const getProjectById = async (projectId, currentUser) => {
@@ -205,6 +249,8 @@ const getProjectById = async (projectId, currentUser) => {
     include: {
       createdBy: true,
       owner: true,
+      plans: { orderBy: { version: "desc" }, take: 1 },
+      requirements: { orderBy: { key: "asc" } },
       tasks: {
         include: taskInclude,
         orderBy: [{ status: "asc" }, { deadline: "asc" }, { createdAt: "desc" }],
@@ -287,21 +333,6 @@ const createProject = async (currentUser, payload) => {
   const owner = await getProjectOwner(currentUser, payload.ownerId || currentUser.id);
   await assertUniqueProjectCode(currentUser.organizationId, code);
 
-  const taskPlan = payload.generateTasksWithAi
-    ? await generateProjectTaskPlan({
-        clientName: payload.clientName,
-        description: payload.description,
-        department: payload.department,
-        dueDate,
-        estimatedHours: payload.estimatedHours,
-        objective: payload.objective,
-        priority: payload.priority,
-        tags: payload.tags,
-        name: payload.name,
-        startDate,
-      })
-    : null;
-
   const projectStatus = payload.status
     ? normalizeProjectStatus(payload.status)
     : startDate && startDate.getTime() > Date.now()
@@ -316,8 +347,8 @@ const createProject = async (currentUser, payload) => {
   const project = await prisma.$transaction(async (transaction) => {
     const createdProject = await transaction.project.create({
       data: {
-        aiAnalyzedAt: taskPlan ? new Date() : null,
-        aiSummary: taskPlan?.summary || null,
+        aiAnalyzedAt: null,
+        aiSummary: null,
         clientName: payload.clientName || null,
         code: code || null,
         createdById: currentUser.id,
@@ -333,28 +364,22 @@ const createProject = async (currentUser, payload) => {
         startDate,
         status: projectStatus,
         tags: payload.tags || [],
+        requirements: payload.requirements?.length
+          ? {
+              create: payload.requirements.map((requirement, index) => ({
+                acceptanceCriteria: requirement.acceptanceCriteria || null,
+                createdById: currentUser.id,
+                description: requirement.description,
+                key: requirementKey(requirement.key, index),
+                organizationId: currentUser.organizationId,
+                priority: String(requirement.priority || "must").toUpperCase(),
+                source: requirement.source || "manual",
+                title: requirement.title,
+              })),
+            }
+          : undefined,
       },
     });
-
-    if (taskPlan) {
-      await transaction.task.createMany({
-        data: taskPlan.tasks.map((task) => ({
-          assignedToId: null,
-          category: task.category,
-          createdById: currentUser.id,
-          deadline: parseDate(task.deadline, "Generated task deadline"),
-          description: task.description,
-          estimatedHours: task.estimatedHours,
-          organizationId: currentUser.organizationId,
-          priority: task.priority,
-          projectId: createdProject.id,
-          projectWeight: task.projectWeight,
-          status: "NEW",
-          successCriteria: task.successCriteria,
-          title: task.title,
-        })),
-      });
-    }
 
     return transaction.project.findUnique({
       include: {
@@ -377,6 +402,17 @@ const createProject = async (currentUser, payload) => {
     });
   });
 
+  let planningPlan = null;
+  let planningWarning = "";
+  if (payload.generateTasksWithAi) {
+    try {
+      planningPlan = await generatePlan(currentUser, project.id);
+    } catch (error) {
+      planningWarning = "The project was created, but its draft plan could not be generated. Open Planning studio to retry.";
+      console.warn(`[planning] Initial plan for project ${project.id} failed:`, error.message);
+    }
+  }
+
   await safelyNotify(() =>
     notifyProjectActivity({ actor: currentUser, event: "created", previousProject: null, project }),
   );
@@ -385,7 +421,7 @@ const createProject = async (currentUser, payload) => {
     actor: currentUser,
     entityId: project.id,
     entityType: "PROJECT",
-    metadata: { generatedTaskCount: taskPlan?.tasks.length || 0, ownerId: project.ownerId },
+    metadata: { generatedPlanId: planningPlan?.id || null, ownerId: project.ownerId },
     summary: `Created project: ${project.name}`,
   });
 
@@ -396,7 +432,7 @@ const createProject = async (currentUser, payload) => {
     systemKey: "projects",
     values: payload.customFields,
   });
-  return { ...serializeProject(project), customFields: savedCustomFields };
+  return { ...serializeProject(project), customFields: savedCustomFields, planningPlan, planningWarning };
 };
 
 const updateProject = async (projectId, currentUser, payload) => {
@@ -414,6 +450,9 @@ const updateProject = async (projectId, currentUser, payload) => {
 
   if (!existingProject) {
     throw new ApiError(404, "Project not found.");
+  }
+  if (payload.expectedVersion && payload.expectedVersion !== existingProject.version) {
+    throw new ApiError(409, "This project changed since you opened it. Refresh before saving.");
   }
   const existingCustomFields = await getSystemEntityData(currentUser, "projects", projectId);
   const preparedCustomFields =
@@ -448,14 +487,36 @@ const updateProject = async (projectId, currentUser, payload) => {
   if (payload.tags !== undefined) data.tags = payload.tags;
 
   validateProjectDates(data.startDate ?? existingProject.startDate, data.dueDate ?? existingProject.dueDate);
+  if (data.status === "COMPLETED") {
+    const unfinishedTasks = await prisma.task.count({
+      where: {
+        deletedAt: null,
+        organizationId: currentUser.organizationId,
+        projectId,
+        status: { not: "COMPLETED" },
+      },
+    });
+    if (unfinishedTasks) {
+      throw new ApiError(409, `Complete ${unfinishedTasks} active project task${unfinishedTasks === 1 ? "" : "s"} first.`);
+    }
+  }
   await validateSystemFields({
     currentUser,
     systemKey: "projects",
     values: { ...existingProject, ...data },
   });
 
-  const project = await prisma.project.update({
-    data,
+  const updated = await prisma.project.updateMany({
+    data: { ...data, version: { increment: 1 } },
+    where: {
+      deletedAt: null,
+      id: projectId,
+      organizationId: currentUser.organizationId,
+      ...(payload.expectedVersion ? { version: payload.expectedVersion } : {}),
+    },
+  });
+  if (updated.count !== 1) throw new ApiError(409, "This project changed while you were editing it.");
+  const project = await prisma.project.findUnique({
     include: {
       createdBy: true,
       owner: true,
@@ -510,6 +571,7 @@ const deleteProject = async (projectId, currentUser) => {
   const existingProject = await prisma.project.findFirst({
     where: {
       id: projectId,
+      deletedAt: null,
       organizationId: currentUser.organizationId,
     },
   });
@@ -518,7 +580,7 @@ const deleteProject = async (projectId, currentUser) => {
     throw new ApiError(404, "Project not found.");
   }
 
-  const taskCount = await prisma.task.count({ where: { organizationId: currentUser.organizationId, projectId } });
+  const taskCount = await prisma.task.count({ where: { deletedAt: null, organizationId: currentUser.organizationId, projectId } });
   if (taskCount > 0) {
     const project = await prisma.project.update({
       data: { status: "ARCHIVED" },
@@ -556,18 +618,23 @@ const deleteProject = async (projectId, currentUser) => {
     return { archived: true, project: serializeProject(project) };
   }
 
-  await prisma.project.delete({ where: { id: projectId } });
-  await deleteSystemEntityData(currentUser, "projects", projectId);
+  await prisma.$transaction([
+    prisma.project.update({ data: { deletedAt: new Date(), version: { increment: 1 } }, where: { id: projectId } }),
+    prisma.auditLog.create({
+      data: {
+        action: "DELETED",
+        actorId: currentUser.id,
+        entityId: existingProject.id,
+        entityType: "PROJECT",
+        metadata: { softDelete: true },
+        organizationId: currentUser.organizationId,
+        summary: `Deleted project: ${existingProject.name}`,
+      },
+    }),
+  ]);
   await safelyNotify(() =>
     notifyProjectActivity({ actor: currentUser, event: "deleted", previousProject: existingProject, project: existingProject }),
   );
-  await safelyRecordAudit({
-    action: "DELETED",
-    actor: currentUser,
-    entityId: existingProject.id,
-    entityType: "PROJECT",
-    summary: `Deleted project: ${existingProject.name}`,
-  });
   return { deleted: true };
 };
 

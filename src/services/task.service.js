@@ -2,11 +2,10 @@ const prisma = require("../db/prisma");
 const ApiError = require("../utils/apiError");
 const { hasPermission, PERMISSIONS } = require("../utils/permissions");
 const { analyzeTaskProgress, refreshProjectWeights, updateProjectProgress } = require("./analysis.service");
-const { notifyTaskActivity, safelyNotify } = require("./notification.service");
+const { notifyTaskActivity, safelyDeliverOutboxEvent, safelyNotify } = require("./notification.service");
 const { buildChangeSet, listEntityActivity, safelyRecordAudit } = require("./audit.service");
 const {
   attachSystemCustomData,
-  deleteSystemEntityData,
   getSystemEntityData,
   saveSystemEntityData,
   validateSystemCustomValues,
@@ -49,6 +48,7 @@ const serializeTask = (task) => ({
   assignedToId: task.assignedToId,
   assignedToName: task.assignedTo?.fullName || "Unassigned",
   category: task.category,
+  confidence: task.confidence ?? null,
   completedAt: task.completedAt,
   createdAt: task.createdAt,
   createdByEmail: task.createdBy?.email || "",
@@ -56,6 +56,13 @@ const serializeTask = (task) => ({
   createdByName: task.createdBy?.fullName || "Manager",
   deadline: task.deadline ? task.deadline.toISOString().slice(0, 10) : "",
   description: task.description,
+  dependencyCount: task._count?.dependencies ?? task.dependencies?.length ?? 0,
+  dependencyIds: (task.dependencies || []).map((dependency) => dependency.dependsOnTaskId),
+  dependencies: (task.dependencies || []).map((dependency) => ({
+    id: dependency.dependsOnTaskId,
+    status: dependency.dependsOn ? String(dependency.dependsOn.status).toLowerCase() : "",
+    title: dependency.dependsOn?.title || "Dependency",
+  })),
   estimatedHours: toNumber(task.estimatedHours),
   id: task.id,
   aiAnalyzedAt: task.aiAnalyzedAt,
@@ -65,18 +72,29 @@ const serializeTask = (task) => ({
   projectId: task.projectId || "",
   projectName: task.project?.name || "Unassigned project",
   projectWeight: toNumber(task.projectWeight) || 0,
+  requiredSkills: task.requiredSkills || [],
+  riskLevel: String(task.riskLevel || "LOW").toLowerCase(),
+  source: task.source || "manual",
   status: String(task.status) === "NEW" ? "open" : String(task.status).toLowerCase(),
   successCriteria: task.successCriteria || "",
   timeLogs: (task.timeLogs || []).map(serializeTimeLog),
   title: task.title,
   totalLoggedHours: (task.timeLogs || []).reduce((total, timeLog) => total + (toNumber(timeLog.hours) || 0), 0),
   updatedAt: task.updatedAt,
+  version: task.version || 1,
+  watcherIds: (task.watchers || []).map((watcher) => watcher.userId),
 });
 
 const taskInclude = {
   assignedTo: true,
   createdBy: true,
   project: true,
+  dependencies: {
+    include: {
+      dependsOn: { select: { id: true, status: true, title: true } },
+    },
+  },
+  watchers: { select: { userId: true } },
   timeLogs: {
     include: {
       user: true,
@@ -112,17 +130,126 @@ const taskChangeFields = [
   },
 ];
 
-const listTasks = async (currentUser) => {
-  const organizationWhere = { organizationId: currentUser.organizationId };
-  const tasks = await prisma.task.findMany({
-    include: taskInclude,
-    orderBy: [{ status: "asc" }, { createdAt: "desc" }],
-    where: hasPermission(currentUser, PERMISSIONS.TASKS_VIEW_ALL)
-      ? organizationWhere
-      : { ...organizationWhere, assignedToId: currentUser.id },
+const validateDependencies = async (currentUser, dependencyIds = [], projectId, excludedTaskId) => {
+  const ids = [...new Set(dependencyIds)].filter((id) => id && id !== excludedTaskId);
+  if (!ids.length) return [];
+  const dependencies = await prisma.task.findMany({
+    select: { id: true },
+    where: {
+      deletedAt: null,
+      id: { in: ids },
+      organizationId: currentUser.organizationId,
+      projectId,
+    },
   });
+  if (dependencies.length !== ids.length) {
+    throw new ApiError(400, "Dependencies must be active tasks from the same project.");
+  }
+  return ids;
+};
 
-  return attachSystemCustomData(currentUser, "tasks", tasks.map(serializeTask));
+const dependencyGraphHasCycle = (edges) => {
+  const graph = new Map();
+  for (const { taskId, dependsOnTaskId } of edges) {
+    if (!graph.has(taskId)) graph.set(taskId, []);
+    graph.get(taskId).push(dependsOnTaskId);
+  }
+  const visiting = new Set();
+  const visited = new Set();
+  const visit = (taskId) => {
+    if (visiting.has(taskId)) return true;
+    if (visited.has(taskId)) return false;
+    visiting.add(taskId);
+    for (const dependencyId of graph.get(taskId) || []) {
+      if (visit(dependencyId)) return true;
+    }
+    visiting.delete(taskId);
+    visited.add(taskId);
+    return false;
+  };
+  return [...graph.keys()].some(visit);
+};
+
+const assertDependencyGraphAcyclic = async (currentUser, taskId, projectId, dependencyIds) => {
+  const existingEdges = await prisma.taskDependency.findMany({
+    select: { dependsOnTaskId: true, taskId: true },
+    where: {
+      task: {
+        deletedAt: null,
+        organizationId: currentUser.organizationId,
+        projectId,
+      },
+    },
+  });
+  const proposedEdges = [
+    ...existingEdges.filter((edge) => edge.taskId !== taskId),
+    ...dependencyIds.map((dependsOnTaskId) => ({ dependsOnTaskId, taskId })),
+  ];
+  if (dependencyGraphHasCycle(proposedEdges)) {
+    throw new ApiError(409, "These dependencies create a cycle. Remove a conflicting prerequisite first.");
+  }
+};
+
+const assertDependenciesComplete = async (taskId, currentUser) => {
+  const openDependencies = await prisma.taskDependency.count({
+    where: {
+      taskId,
+      dependsOn: {
+        deletedAt: null,
+        organizationId: currentUser.organizationId,
+        status: { not: "COMPLETED" },
+      },
+    },
+  });
+  if (openDependencies) {
+    throw new ApiError(409, `Complete ${openDependencies} prerequisite task${openDependencies === 1 ? "" : "s"} first.`);
+  }
+};
+
+const listTasks = async (currentUser, filters = {}) => {
+  const page = Math.max(1, Number(filters.page) || 1);
+  const limit = Math.max(1, Math.min(Number(filters.limit) || 50, 100));
+  const organizationWhere = { deletedAt: null, organizationId: currentUser.organizationId };
+  const status = filters.status && filters.status !== "all" ? normalizeStatus(filters.status) : undefined;
+  const priority = filters.priority && filters.priority !== "all" ? normalizePriority(filters.priority) : undefined;
+  const dueFrom = filters.dueFrom ? parseDate(filters.dueFrom, "Due from") : undefined;
+  const dueTo = filters.dueTo ? parseDate(filters.dueTo, "Due to") : undefined;
+  const search = String(filters.search || "").trim();
+  const where = {
+    ...(hasPermission(currentUser, PERMISSIONS.TASKS_VIEW_ALL)
+      ? organizationWhere
+      : { ...organizationWhere, assignedToId: currentUser.id }),
+    ...(status ? { status } : {}),
+    ...(priority ? { priority } : {}),
+    ...(filters.projectId ? { projectId: filters.projectId } : {}),
+    ...(filters.assignedToId ? { assignedToId: filters.assignedToId } : {}),
+    ...(filters.createdById ? { createdById: filters.createdById } : {}),
+    ...(dueFrom || dueTo ? { deadline: { ...(dueFrom ? { gte: dueFrom } : {}), ...(dueTo ? { lte: dueTo } : {}) } } : {}),
+    ...(search
+      ? {
+          OR: [
+            { title: { contains: search, mode: "insensitive" } },
+            { description: { contains: search, mode: "insensitive" } },
+            { category: { contains: search, mode: "insensitive" } },
+          ],
+        }
+      : {}),
+  };
+  const [tasks, total] = await Promise.all([
+    prisma.task.findMany({
+      include: taskInclude,
+      orderBy: filters.sort === "due" ? [{ deadline: "asc" }, { createdAt: "desc" }] : [{ status: "asc" }, { updatedAt: "desc" }],
+      skip: (page - 1) * limit,
+      take: limit,
+      where,
+    }),
+    prisma.task.count({ where }),
+  ]);
+
+  return {
+    pagination: { limit, page, pages: Math.max(1, Math.ceil(total / limit)), total },
+    tasks: await attachSystemCustomData(currentUser, "tasks", tasks.map(serializeTask)),
+  };
 };
 
 const createTask = async (currentUser, payload) => {
@@ -135,21 +262,21 @@ const createTask = async (currentUser, payload) => {
     values: payload.customFields,
   });
 
-  const assignee = await prisma.user.findFirst({
-    where: {
-      id: payload.assignedToId,
-      organizationId: currentUser.organizationId,
-      status: "ACTIVE",
-    },
-  });
-
-  if (!assignee) {
-    throw new ApiError(400, "Choose a valid active team member.");
-  }
+  const assignee = payload.assignedToId
+    ? await prisma.user.findFirst({
+        where: {
+          id: payload.assignedToId,
+          organizationId: currentUser.organizationId,
+          status: "ACTIVE",
+        },
+      })
+    : null;
+  if (payload.assignedToId && !assignee) throw new ApiError(400, "Choose a valid active team member.");
 
   const project = await prisma.project.findFirst({
     where: {
       id: payload.projectId,
+      deletedAt: null,
       organizationId: currentUser.organizationId,
     },
   });
@@ -164,25 +291,55 @@ const createTask = async (currentUser, payload) => {
   await validateSystemFields({
     currentUser,
     systemKey: "tasks",
-    values: { ...payload, assignedToId: assignee.id, projectId: project.id },
+    values: { ...payload, assignedToId: assignee?.id || null, projectId: project.id },
   });
+  const dependencyIds = await validateDependencies(currentUser, payload.dependencyIds, project.id);
 
-  const task = await prisma.task.create({
-    data: {
-      assignedToId: assignee.id,
-      category: payload.category,
-      createdById: currentUser.id,
-      deadline: parseDate(payload.deadline, "Deadline"),
-      description: payload.description,
-      estimatedHours: payload.estimatedHours ?? null,
-      organizationId: currentUser.organizationId,
-      priority: normalizePriority(payload.priority),
-      projectId: payload.projectId,
-      successCriteria: payload.successCriteria || null,
-      status: normalizeStatus(payload.status),
-      title: payload.title,
-    },
-    include: taskInclude,
+  const task = await prisma.$transaction(async (transaction) => {
+    const created = await transaction.task.create({
+      data: {
+        assignedToId: assignee?.id || null,
+        category: payload.category,
+        createdById: currentUser.id,
+        deadline: parseDate(payload.deadline, "Deadline"),
+        description: payload.description,
+        estimatedHours: payload.estimatedHours ?? null,
+        organizationId: currentUser.organizationId,
+        priority: normalizePriority(payload.priority),
+        projectId: payload.projectId,
+        requiredSkills: payload.requiredSkills,
+        riskLevel: String(payload.riskLevel).toUpperCase(),
+        successCriteria: payload.successCriteria || null,
+        status: normalizeStatus(payload.status),
+        title: payload.title,
+      },
+    });
+    if (dependencyIds.length) {
+      await transaction.taskDependency.createMany({
+        data: dependencyIds.map((dependsOnTaskId) => ({ dependsOnTaskId, taskId: created.id })),
+      });
+    }
+    await transaction.auditLog.create({
+      data: {
+        action: "CREATED",
+        actorId: currentUser.id,
+        entityId: created.id,
+        entityType: "TASK",
+        metadata: { assigneeId: created.assignedToId, dependencyIds, projectId: created.projectId },
+        organizationId: currentUser.organizationId,
+        summary: `Created task: ${created.title}`,
+      },
+    });
+    await transaction.outboxEvent.create({
+      data: {
+        aggregateId: created.id,
+        aggregateType: "TASK",
+        organizationId: currentUser.organizationId,
+        payload: { assigneeId: created.assignedToId, projectId: created.projectId },
+        topic: "task.created",
+      },
+    });
+    return created;
   });
 
   await refreshProjectWeights(project.id, currentUser.organizationId);
@@ -195,15 +352,6 @@ const createTask = async (currentUser, payload) => {
   await safelyNotify(() =>
     notifyTaskActivity({ actor: currentUser, event: "created", previousTask: null, task: analyzedTask }),
   );
-  await safelyRecordAudit({
-    action: "CREATED",
-    actor: currentUser,
-    entityId: analyzedTask.id,
-    entityType: "TASK",
-    metadata: { assigneeId: analyzedTask.assignedToId, projectId: analyzedTask.projectId },
-    summary: `Created task: ${analyzedTask.title}`,
-  });
-
   const savedCustomFields = await saveSystemEntityData({
     currentUser,
     entityId: analyzedTask.id,
@@ -219,6 +367,7 @@ const getTaskForAction = async (taskId, currentUser) => {
     include: taskInclude,
     where: {
       id: taskId,
+      deletedAt: null,
       organizationId: currentUser.organizationId,
     },
   });
@@ -239,6 +388,7 @@ const getTaskById = async (taskId, currentUser) => {
     include: taskInclude,
     where: {
       id: taskId,
+      deletedAt: null,
       organizationId: currentUser.organizationId,
     },
   });
@@ -285,6 +435,7 @@ const getTaskActivity = async (taskId, currentUser) => {
     },
     where: {
       id: taskId,
+      deletedAt: null,
       organizationId: currentUser.organizationId,
     },
   });
@@ -346,6 +497,9 @@ const updateTask = async (taskId, currentUser, payload) => {
   }
 
   const existingTask = await getTaskForAction(taskId, currentUser);
+  if (payload.expectedVersion && payload.expectedVersion !== existingTask.version) {
+    throw new ApiError(409, "This task changed since you opened it. Refresh before saving your changes.");
+  }
   const existingCustomFields = await getSystemEntityData(currentUser, "tasks", taskId);
   const preparedCustomFields =
     payload.customFields === undefined
@@ -379,6 +533,7 @@ const updateTask = async (taskId, currentUser, payload) => {
     const project = await prisma.project.findFirst({
       where: {
         id: payload.projectId,
+        deletedAt: null,
         organizationId: currentUser.organizationId,
       },
     });
@@ -394,11 +549,14 @@ const updateTask = async (taskId, currentUser, payload) => {
   if (payload.description !== undefined) data.description = payload.description;
   if (payload.estimatedHours !== undefined) data.estimatedHours = payload.estimatedHours;
   if (payload.priority !== undefined) data.priority = normalizePriority(payload.priority);
+  if (payload.requiredSkills !== undefined) data.requiredSkills = payload.requiredSkills;
+  if (payload.riskLevel !== undefined) data.riskLevel = String(payload.riskLevel).toUpperCase();
   if (payload.successCriteria !== undefined) data.successCriteria = payload.successCriteria || null;
   if (payload.title !== undefined) data.title = payload.title;
 
   if (payload.status !== undefined) {
     const status = normalizeStatus(payload.status);
+    if (status === "COMPLETED") await assertDependenciesComplete(taskId, currentUser);
     data.status = status;
     data.aiAnalyzedAt = new Date();
     data.aiProgress = status === "COMPLETED" ? 100 : Math.min(existingTask.aiProgress || 0, 95);
@@ -409,10 +567,56 @@ const updateTask = async (taskId, currentUser, payload) => {
     systemKey: "tasks",
     values: { ...existingTask, ...data },
   });
-
-  await prisma.task.update({ data, where: { id: taskId } });
-
   const nextProjectId = data.projectId || existingTask.projectId;
+  const projectChanged = Boolean(data.projectId && data.projectId !== existingTask.projectId);
+  if (projectChanged) {
+    const dependentCount = await prisma.taskDependency.count({ where: { dependsOnTaskId: taskId } });
+    if (dependentCount) {
+      throw new ApiError(409, "Remove tasks that depend on this task before moving it to another project.");
+    }
+  }
+  const requestedDependencyIds =
+    payload.dependencyIds === undefined && projectChanged ? [] : payload.dependencyIds;
+  const dependencyIds =
+    requestedDependencyIds === undefined
+      ? null
+      : await validateDependencies(currentUser, requestedDependencyIds, nextProjectId, taskId);
+  if (dependencyIds) {
+    await assertDependencyGraphAcyclic(currentUser, taskId, nextProjectId, dependencyIds);
+  }
+
+  await prisma.$transaction(async (transaction) => {
+    const updated = await transaction.task.updateMany({
+      data: { ...data, version: { increment: 1 } },
+      where: {
+        deletedAt: null,
+        id: taskId,
+        organizationId: currentUser.organizationId,
+        ...(payload.expectedVersion ? { version: payload.expectedVersion } : {}),
+      },
+    });
+    if (updated.count !== 1) {
+      throw new ApiError(409, "This task changed while you were editing it. Refresh and try again.");
+    }
+    if (dependencyIds) {
+      await transaction.taskDependency.deleteMany({ where: { taskId } });
+      if (dependencyIds.length) {
+        await transaction.taskDependency.createMany({
+          data: dependencyIds.map((dependsOnTaskId) => ({ dependsOnTaskId, taskId })),
+        });
+      }
+    }
+    await transaction.outboxEvent.create({
+      data: {
+        aggregateId: taskId,
+        aggregateType: "TASK",
+        organizationId: currentUser.organizationId,
+        payload: { fields: Object.keys(data), projectId: nextProjectId },
+        topic: "task.updated",
+      },
+    });
+  });
+
   if (data.projectId && data.projectId !== existingTask.projectId) {
     await refreshProjectWeights(existingTask.projectId, currentUser.organizationId);
     await refreshProjectWeights(data.projectId, currentUser.organizationId);
@@ -456,19 +660,41 @@ const updateTask = async (taskId, currentUser, payload) => {
   return { ...serializeTask(updatedTask), customFields };
 };
 
-const updateTaskStatus = async (taskId, status, currentUser) => {
+const updateTaskStatus = async (taskId, payload, currentUser) => {
   const existingTask = await getTaskForAction(taskId, currentUser);
 
-  const normalizedStatus = normalizeStatus(status);
-  const task = await prisma.task.update({
-    data: {
-      aiAnalyzedAt: new Date(),
-      aiProgress: normalizedStatus === "COMPLETED" ? 100 : Math.min(existingTask.aiProgress || 0, 95),
-      completedAt: normalizedStatus === "COMPLETED" ? existingTask.completedAt || new Date() : null,
-      status: normalizedStatus,
-    },
-    include: taskInclude,
-    where: { id: taskId },
+  const normalizedStatus = normalizeStatus(payload.status);
+  if (normalizedStatus === "COMPLETED") await assertDependenciesComplete(taskId, currentUser);
+  const task = await prisma.$transaction(async (transaction) => {
+    const updated = await transaction.task.updateMany({
+      data: {
+        aiAnalyzedAt: new Date(),
+        aiProgress: normalizedStatus === "COMPLETED" ? 100 : Math.min(existingTask.aiProgress || 0, 95),
+        completedAt: normalizedStatus === "COMPLETED" ? existingTask.completedAt || new Date() : null,
+        status: normalizedStatus,
+        version: { increment: 1 },
+      },
+      where: {
+        deletedAt: null,
+        id: taskId,
+        organizationId: currentUser.organizationId,
+        ...(payload.expectedVersion ? { version: payload.expectedVersion } : {}),
+      },
+    });
+    if (updated.count !== 1) throw new ApiError(409, "This task changed in another session. Refresh before updating it.");
+    const nextTask = await transaction.task.findUnique({ include: taskInclude, where: { id: taskId } });
+    await transaction.auditLog.create({
+      data: {
+        action: normalizedStatus === "COMPLETED" ? "COMPLETED" : "STATUS_CHANGED",
+        actorId: currentUser.id,
+        entityId: taskId,
+        entityType: "TASK",
+        metadata: { changes: buildChangeSet(existingTask, nextTask, taskChangeFields) },
+        organizationId: currentUser.organizationId,
+        summary: `Moved ${nextTask.title} to ${String(nextTask.status).toLowerCase().replace("_", " ")}`,
+      },
+    });
+    return nextTask;
   });
 
   await updateProjectProgress(task.projectId, currentUser.organizationId);
@@ -482,20 +708,14 @@ const updateTaskStatus = async (taskId, status, currentUser) => {
     }),
   );
 
-  await safelyRecordAudit({
-    action: normalizedStatus === "COMPLETED" ? "COMPLETED" : "STATUS_CHANGED",
-    actor: currentUser,
-    entityId: task.id,
-    entityType: "TASK",
-    metadata: { changes: buildChangeSet(existingTask, task, taskChangeFields) },
-    summary: `Moved ${task.title} to ${String(task.status).toLowerCase().replace("_", " ")}`,
-  });
-
   return (await attachSystemCustomData(currentUser, "tasks", [serializeTask(task)]))[0];
 };
 
 const createTimeLog = async (taskId, currentUser, payload) => {
   const task = await getTaskForAction(taskId, currentUser);
+  if (task.status === "COMPLETED") {
+    throw new ApiError(409, "Reopen the task before adding another work log.");
+  }
 
   const timeLog = await prisma.timeLog.create({
     data: {
@@ -555,8 +775,29 @@ const deleteTask = async (taskId, currentUser) => {
   }
 
   const task = await getTaskForAction(taskId, currentUser);
-  await prisma.task.delete({ where: { id: taskId } });
-  await deleteSystemEntityData(currentUser, "tasks", taskId);
+  await prisma.$transaction([
+    prisma.task.update({ data: { deletedAt: new Date(), version: { increment: 1 } }, where: { id: taskId } }),
+    prisma.auditLog.create({
+      data: {
+        action: "DELETED",
+        actorId: currentUser.id,
+        entityId: task.id,
+        entityType: "TASK",
+        metadata: { projectId: task.projectId, softDelete: true },
+        organizationId: currentUser.organizationId,
+        summary: `Deleted task: ${task.title}`,
+      },
+    }),
+    prisma.outboxEvent.create({
+      data: {
+        aggregateId: task.id,
+        aggregateType: "TASK",
+        organizationId: currentUser.organizationId,
+        payload: { projectId: task.projectId },
+        topic: "task.deleted",
+      },
+    }),
+  ]);
   await refreshProjectWeights(task.projectId, currentUser.organizationId);
   await safelyNotify(() =>
     notifyTaskActivity({
@@ -566,18 +807,154 @@ const deleteTask = async (taskId, currentUser) => {
       task: { ...task, assignedToId: null },
     }),
   );
-  await safelyRecordAudit({
-    action: "DELETED",
-    actor: currentUser,
-    entityId: task.id,
-    entityType: "TASK",
-    metadata: { projectId: task.projectId },
-    summary: `Deleted task: ${task.title}`,
+};
+
+const serializeComment = (comment) => ({
+  author: {
+    id: comment.author.id,
+    name: comment.author.fullName,
+    role: String(comment.author.role).toLowerCase(),
+  },
+  body: comment.body,
+  createdAt: comment.createdAt,
+  editedAt: comment.editedAt,
+  id: comment.id,
+  mentions: comment.mentions || [],
+});
+
+const listTaskComments = async (taskId, currentUser) => {
+  await getTaskById(taskId, currentUser);
+  const comments = await prisma.taskComment.findMany({
+    include: { author: true },
+    orderBy: { createdAt: "asc" },
+    take: 300,
+    where: { deletedAt: null, taskId },
+  });
+  return comments.map(serializeComment);
+};
+
+const createTaskComment = async (taskId, currentUser, payload) => {
+  const task = await getTaskForAction(taskId, currentUser);
+  const mentionIds = [...new Set(payload.mentions || [])].filter((id) => id !== currentUser.id);
+  const mentionedUsers = mentionIds.length
+    ? await prisma.user.findMany({
+        select: { id: true },
+        where: { id: { in: mentionIds }, organizationId: currentUser.organizationId, status: "ACTIVE" },
+      })
+    : [];
+  if (mentionedUsers.length !== mentionIds.length) throw new ApiError(400, "One or more mentioned users are invalid.");
+
+  const result = await prisma.$transaction(async (transaction) => {
+    const created = await transaction.taskComment.create({
+      data: { authorId: currentUser.id, body: payload.body, mentions: mentionIds, taskId },
+      include: { author: true },
+    });
+    const watchers = await transaction.taskWatcher.findMany({ select: { userId: true }, where: { taskId } });
+    const recipients = [...new Set([
+      ...mentionIds,
+      ...watchers.map((watcher) => watcher.userId),
+      task.assignedToId,
+      task.createdById,
+    ].filter((id) => id && id !== currentUser.id))];
+    if (recipients.length) {
+      await transaction.notification.createMany({
+        data: recipients.map((recipientId) => ({
+          actionUrl: `/tasks/${taskId}`,
+          actorId: currentUser.id,
+          entityId: taskId,
+          entityType: "task",
+          message: `${currentUser.fullName} commented on "${task.title}".`,
+          organizationId: currentUser.organizationId,
+          recipientId,
+          title: mentionIds.includes(recipientId) ? "You were mentioned" : "New task comment",
+          type: mentionIds.includes(recipientId) ? "TASK_MENTION" : "TASK_COMMENT",
+        })),
+      });
+    }
+    await transaction.auditLog.create({
+      data: {
+        action: "COMMENTED",
+        actorId: currentUser.id,
+        entityId: taskId,
+        entityType: "TASK",
+        metadata: { commentId: created.id, mentions: mentionIds },
+        organizationId: currentUser.organizationId,
+        summary: `Commented on task: ${task.title}`,
+      },
+    });
+    const outboxEvent = await transaction.outboxEvent.create({
+      data: {
+        aggregateId: taskId,
+        aggregateType: "TASK",
+        organizationId: currentUser.organizationId,
+        payload: {
+          commentId: created.id,
+          push: {
+            actionUrl: `/tasks/${taskId}`,
+            entityId: taskId,
+            entityType: "task",
+            message: `${currentUser.fullName} commented on "${task.title}".`,
+            title: "New task comment",
+            type: "TASK_COMMENT",
+          },
+          recipientIds: recipients,
+        },
+        topic: "task.commented",
+      },
+    });
+    return { comment: created, outboxEventId: outboxEvent.id };
+  });
+  await safelyDeliverOutboxEvent(result.outboxEventId);
+  return serializeComment(result.comment);
+};
+
+const setTaskWatching = async (taskId, currentUser, watching) => {
+  await getTaskById(taskId, currentUser);
+  if (watching) {
+    await prisma.taskWatcher.upsert({
+      create: { taskId, userId: currentUser.id },
+      update: {},
+      where: { taskId_userId: { taskId, userId: currentUser.id } },
+    });
+  } else {
+    await prisma.taskWatcher.deleteMany({ where: { taskId, userId: currentUser.id } });
+  }
+  return { watching: Boolean(watching) };
+};
+
+const listTaskAttachments = async (taskId, currentUser) => {
+  await getTaskById(taskId, currentUser);
+  return prisma.taskAttachment.findMany({
+    include: { uploadedBy: { select: { fullName: true, id: true } } },
+    orderBy: { createdAt: "desc" },
+    where: { taskId },
+  });
+};
+
+const createTaskAttachment = async (taskId, currentUser, payload) => {
+  const task = await getTaskForAction(taskId, currentUser);
+  return prisma.$transaction(async (transaction) => {
+    const attachment = await transaction.taskAttachment.create({
+      data: { ...payload, taskId, uploadedById: currentUser.id },
+      include: { uploadedBy: { select: { fullName: true, id: true } } },
+    });
+    await transaction.auditLog.create({
+      data: {
+        action: "ATTACHED",
+        actorId: currentUser.id,
+        entityId: taskId,
+        entityType: "TASK",
+        metadata: { attachmentId: attachment.id, name: attachment.name },
+        organizationId: currentUser.organizationId,
+        summary: `Attached ${attachment.name} to ${task.title}`,
+      },
+    });
+    return attachment;
   });
 };
 
 const getTaskStats = async (currentUser) => {
-  const organizationWhere = { organizationId: currentUser.organizationId };
+  const organizationWhere = { deletedAt: null, organizationId: currentUser.organizationId };
   const where = hasPermission(currentUser, PERMISSIONS.TASKS_VIEW_ALL)
     ? organizationWhere
     : { ...organizationWhere, assignedToId: currentUser.id };
@@ -591,13 +968,19 @@ const getTaskStats = async (currentUser) => {
 };
 
 module.exports = {
+  createTaskAttachment,
+  createTaskComment,
   createTimeLog,
   createTask,
   deleteTask,
+  dependencyGraphHasCycle,
   getTaskActivity,
   getTaskById,
   getTaskStats,
+  listTaskAttachments,
+  listTaskComments,
   listTasks,
+  setTaskWatching,
   serializeTask,
   taskInclude,
   updateTask,

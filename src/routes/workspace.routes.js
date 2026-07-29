@@ -8,5 +8,8 @@ const router = express.Router();
 router.use(authenticate);
 router.get("/settings", workspaceController.getSettings);
 router.patch("/settings", requirePermission(PERMISSIONS.SETTINGS_MANAGE), workspaceController.updateSettings);
+router.post("/offices", requirePermission(PERMISSIONS.SETTINGS_MANAGE), workspaceController.createOffice);
+router.patch("/offices/:officeId", requirePermission(PERMISSIONS.SETTINGS_MANAGE), workspaceController.updateOffice);
+router.delete("/offices/:officeId", requirePermission(PERMISSIONS.SETTINGS_MANAGE), workspaceController.deleteOffice);
 
 module.exports = router;

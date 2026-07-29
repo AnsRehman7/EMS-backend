@@ -2,6 +2,8 @@ const fs = require("fs");
 const axios = require("axios");
 const { applicationDefault, cert, getApps, initializeApp } = require("firebase-admin/app");
 const { getAuth } = require("firebase-admin/auth");
+const { getAppCheck } = require("firebase-admin/app-check");
+const { getMessaging } = require("firebase-admin/messaging");
 const ApiError = require("../utils/apiError");
 const { env } = require("./env");
 
@@ -80,6 +82,7 @@ const getCredential = () => {
   return null;
 };
 
+let adminApp = null;
 const getAdminAuth = () => {
   if (!hasAdminCredential) return null;
 
@@ -90,15 +93,21 @@ const getAdminAuth = () => {
     options.projectId = projectId;
   }
 
-  const app = getApps()[0] || initializeApp(options);
-  return getAuth(app);
+  adminApp = getApps()[0] || initializeApp(options);
+  return getAuth(adminApp);
 };
 
 let adminAuth = null;
 try {
   adminAuth = getAdminAuth();
 } catch (error) {
-  console.error(`[firebase] Unable to initialize Firebase Admin; using the REST fallback: ${error.message}`);
+  console.error(`[firebase] Unable to initialize Firebase Admin: ${error.message}`);
+}
+
+if (env.nodeEnv === "production" && !adminAuth) {
+  throw new Error(
+    "[firebase] Firebase Admin credentials are required and must initialize successfully in production.",
+  );
 }
 
 const mapRestAuthError = (code = "") => {
@@ -113,7 +122,7 @@ const mapRestAuthError = (code = "") => {
     TOO_MANY_ATTEMPTS_TRY_LATER: "Too many attempts. Please wait a moment and try again.",
     USER_DISABLED: "This Firebase account is disabled.",
     USER_NOT_FOUND: "Firebase account was not found.",
-    WEAK_PASSWORD: "Password must be at least 6 characters.",
+    WEAK_PASSWORD: "Password must be at least 12 characters.",
   };
 
   return messages[normalizedCode] || normalizedCode || "Firebase authentication failed.";
@@ -230,6 +239,8 @@ const restAuth = {
 };
 
 module.exports = {
+  firebaseAppCheck: adminApp ? getAppCheck(adminApp) : null,
+  firebaseMessaging: adminApp ? getMessaging(adminApp) : null,
   firebaseAuth: adminAuth || restAuth,
   firebaseAuthMode: adminAuth ? "admin" : hasRestFallback ? "rest" : "unconfigured",
   firebaseAuthReady: Boolean(adminAuth || hasRestFallback),

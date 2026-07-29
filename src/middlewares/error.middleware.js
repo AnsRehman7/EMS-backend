@@ -1,6 +1,16 @@
 const { ZodError } = require("zod");
 const ApiError = require("../utils/apiError");
 
+const errorCodeForStatus = (statusCode) => ({
+  400: "BAD_REQUEST",
+  401: "UNAUTHORIZED",
+  403: "FORBIDDEN",
+  404: "NOT_FOUND",
+  409: "CONFLICT",
+  413: "PAYLOAD_TOO_LARGE",
+  429: "RATE_LIMITED",
+}[statusCode] || (statusCode >= 500 ? "INTERNAL_ERROR" : "REQUEST_ERROR"));
+
 const notFound = (req, _res, next) => {
   next(new ApiError(404, `Route not found: ${req.method} ${req.originalUrl}`));
 };
@@ -26,6 +36,7 @@ const errorHandler = (error, req, res, _next) => {
 
   return res.status(statusCode).json({
     error: {
+      code: error.apiCode || errorCodeForStatus(statusCode),
       details: error.details,
       message,
       requestId: req.requestId,

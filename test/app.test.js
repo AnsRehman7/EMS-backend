@@ -29,4 +29,10 @@ test("public operational endpoints are healthy", async (context) => {
 
   const faviconResponse = await fetch(`${baseUrl}/favicon.ico`);
   assert.equal(faviconResponse.status, 204);
+
+  const missingResponse = await fetch(`${baseUrl}/missing-route`);
+  const missing = await missingResponse.json();
+  assert.equal(missingResponse.status, 404);
+  assert.equal(missing.error.code, "NOT_FOUND");
+  assert.equal(missing.error.requestId, missingResponse.headers.get("x-request-id"));
 });

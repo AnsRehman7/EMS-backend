@@ -1,4 +1,5 @@
 const prisma = require("../db/prisma");
+const { randomBytes } = require("crypto");
 const ApiError = require("../utils/apiError");
 const { firebaseAuth } = require("../config/firebaseAdmin");
 const {
@@ -35,6 +36,7 @@ const serializeUser = (user) => {
   const assignedPermissions = resolvePermissions(user);
 
   return {
+  avatarUrl: user.avatarUrl || "",
   contact: user.contact || "",
   createdAt: user.createdAt,
   department: user.department || "",
@@ -52,6 +54,8 @@ const serializeUser = (user) => {
         timezone: user.organization.timezone,
         trialEndsAt: user.organization.trialEndsAt,
         weekStartsOn: user.organization.weekStartsOn,
+        workingDays: user.organization.workingDays?.length ? user.organization.workingDays : [1, 2, 3, 4, 5],
+        holidays: user.organization.holidays || [],
         workdayEnd: user.organization.workdayEnd,
         workdayStart: user.organization.workdayStart,
       }
@@ -81,9 +85,11 @@ const serializeUser = (user) => {
     usesRoleDefaults: !user.usesCustomPermissions,
   },
   role: toClientRole(user.role),
+  skills: user.skills || [],
   status: String(user.status || "ACTIVE").toLowerCase(),
   uid: user.firebaseUid,
   updatedAt: user.updatedAt,
+  weeklyCapacityHours: Number(user.weeklyCapacityHours || 40),
   };
 };
 
@@ -123,15 +129,43 @@ const ensureOrganization = (currentUser) => {
   }
 };
 
+const ensureActiveSuperAdminRemains = async (existingUser, nextRole, nextStatus) => {
+  const removesActiveSuperAdmin =
+    existingUser.role === USER_ROLES.SUPER_ADMIN &&
+    existingUser.status === "ACTIVE" &&
+    (nextRole !== USER_ROLES.SUPER_ADMIN || nextStatus !== "ACTIVE");
+  if (!removesActiveSuperAdmin) return;
+
+  const candidates = await prisma.user.findMany({
+    select: { customPermissions: true, usesCustomPermissions: true },
+    where: {
+      id: { not: existingUser.id },
+      organizationId: existingUser.organizationId,
+      role: USER_ROLES.SUPER_ADMIN,
+      status: "ACTIVE",
+    },
+  });
+  const remaining = candidates.some(
+    (candidate) =>
+      !candidate.usesCustomPermissions ||
+      [PERMISSIONS.USERS_MANAGE, PERMISSIONS.PERMISSIONS_MANAGE].every((permission) =>
+        candidate.customPermissions.includes(permission),
+      ),
+  );
+  if (!remaining) {
+    throw new ApiError(409, "Add another active super admin before changing this account.");
+  }
+};
+
 const mapFirebaseAdminError = (error) => {
   const messages = {
     EMAIL_EXISTS: "A Firebase login already exists for this email.",
     INVALID_EMAIL: "Enter a valid email address.",
     OPERATION_NOT_ALLOWED: "Enable Email/Password sign-in in Firebase Authentication.",
-    WEAK_PASSWORD: "Password must be at least 6 characters.",
+    WEAK_PASSWORD: "Password must be at least 12 characters.",
     "auth/email-already-exists": "A Firebase login already exists for this email.",
     "auth/invalid-email": "Enter a valid email address.",
-    "auth/invalid-password": "Password must be at least 6 characters.",
+    "auth/invalid-password": "Password must be at least 12 characters.",
     "auth/user-not-found": "Firebase account was not found.",
     "firebase/admin-credentials-required": error?.message,
   };
@@ -166,6 +200,9 @@ const syncUserProfile = async (firebaseUser, payload = {}) => {
   const existingUser = userByUid || userByEmail;
 
   if (existingUser) {
+    if (existingUser.status === "SUSPENDED") {
+      throw new ApiError(403, "This account is suspended. Contact your workspace administrator.");
+    }
     if (existingUser.firebaseUid !== firebaseUid && !firebaseUser.email_verified) {
       throw new ApiError(403, "Verify this email with Google before connecting it to a workspace account.");
     }
@@ -245,6 +282,12 @@ const syncUserProfile = async (firebaseUser, payload = {}) => {
 const getCurrentUser = (user) => serializeUserWithCustomData(user, user);
 
 const updateCurrentProfile = async (currentUser, payload) => {
+  if (
+    payload.weeklyCapacityHours !== undefined &&
+    !hasPermission(currentUser, PERMISSIONS.USERS_MANAGE)
+  ) {
+    throw new ApiError(403, "Only workspace administrators can change weekly capacity.");
+  }
   const existingCustomFields = await getSystemEntityData(currentUser, "users", currentUser.id);
   const preparedCustomFields =
     payload.customFields === undefined
@@ -262,10 +305,13 @@ const updateCurrentProfile = async (currentUser, payload) => {
   });
   const updatedUser = await prisma.user.update({
     data: {
+      ...(payload.avatarUrl !== undefined ? { avatarUrl: payload.avatarUrl || null } : {}),
       contact: payload.contact ?? currentUser.contact,
       department: payload.department ?? currentUser.department,
       designation: payload.designation ?? currentUser.designation,
       fullName: payload.fullName || currentUser.fullName,
+      ...(payload.skills !== undefined ? { skills: payload.skills } : {}),
+      ...(payload.weeklyCapacityHours !== undefined ? { weeklyCapacityHours: payload.weeklyCapacityHours } : {}),
     },
     include: {
       organization: true,
@@ -369,7 +415,7 @@ const createOrganizationUser = async (currentUser, payload) => {
       displayName: payload.fullName,
       email,
       emailVerified: false,
-      password: payload.password,
+      password: payload.password || randomBytes(32).toString("base64url"),
     });
   } catch (error) {
     if (error instanceof ApiError) throw error;
@@ -380,6 +426,7 @@ const createOrganizationUser = async (currentUser, payload) => {
   try {
     const user = await prisma.user.create({
       data: {
+        avatarUrl: payload.avatarUrl || null,
         contact: payload.contact || "",
         department: payload.department || "",
         designation: payload.designation || "",
@@ -389,6 +436,8 @@ const createOrganizationUser = async (currentUser, payload) => {
         invitedById: currentUser.id,
         organizationId: currentUser.organizationId,
         role,
+        skills: payload.skills || [],
+        weeklyCapacityHours: payload.weeklyCapacityHours || 40,
       },
       include: {
         organization: true,
@@ -480,6 +529,13 @@ const updateOrganizationUser = async (currentUser, userId, payload) => {
 
   const nextEmail = payload.email ? normalizeEmail(payload.email) : existingUser.email;
   const nextStatus = payload.status ? normalizeStatus(payload.status) : existingUser.status;
+  if (nextEmail !== existingUser.email) {
+    const duplicateEmail = await prisma.user.findUnique({ select: { id: true }, where: { email: nextEmail } });
+    if (duplicateEmail && duplicateEmail.id !== existingUser.id) {
+      throw new ApiError(409, "Another workspace account already uses this email address.");
+    }
+  }
+  await ensureActiveSuperAdminRemains(existingUser, nextRole, nextStatus);
   await validateSystemFields({
     currentUser,
     systemKey: "users",
@@ -489,7 +545,9 @@ const updateOrganizationUser = async (currentUser, userId, payload) => {
       email: nextEmail,
       fullName: payload.fullName || existingUser.fullName,
       role: nextRole,
+      ...(payload.skills !== undefined ? { skills: payload.skills } : {}),
       status: nextStatus,
+      ...(payload.weeklyCapacityHours !== undefined ? { weeklyCapacityHours: payload.weeklyCapacityHours } : {}),
     },
   });
   const firebaseUpdates = {};
@@ -511,13 +569,16 @@ const updateOrganizationUser = async (currentUser, userId, payload) => {
 
   const updatedUser = await prisma.user.update({
     data: {
+      ...(payload.avatarUrl !== undefined ? { avatarUrl: payload.avatarUrl || null } : {}),
       contact: payload.contact ?? existingUser.contact,
       department: payload.department ?? existingUser.department,
       designation: payload.designation ?? existingUser.designation,
       email: nextEmail,
       fullName: payload.fullName || existingUser.fullName,
       role: nextRole,
+      ...(payload.skills !== undefined ? { skills: payload.skills } : {}),
       status: nextStatus,
+      ...(payload.weeklyCapacityHours !== undefined ? { weeklyCapacityHours: payload.weeklyCapacityHours } : {}),
       ...(payload.role && nextRole !== existingUser.role
         ? { customPermissions: [], usesCustomPermissions: false }
         : {}),
@@ -602,6 +663,18 @@ const updateUserPermissions = async (currentUser, userId, payload) => {
   ) {
     throw new ApiError(400, "Module customization is reserved for super admin accounts.");
   }
+  if (
+    existingUser.role === USER_ROLES.SUPER_ADMIN &&
+    !payload.useRoleDefaults &&
+    ![PERMISSIONS.USERS_MANAGE, PERMISSIONS.PERMISSIONS_MANAGE].every((permission) =>
+      requestedPermissions.includes(permission),
+    )
+  ) {
+    throw new ApiError(
+      400,
+      "A super admin custom policy must retain user and permission administration access.",
+    );
+  }
 
   const actorPermissions = resolvePermissions(currentUser);
   if (
@@ -648,6 +721,8 @@ const deleteOrganizationUser = async (currentUser, userId) => {
   if (currentUser.id === existingUser.id) {
     throw new ApiError(400, "You cannot delete your own account.");
   }
+
+  await ensureActiveSuperAdminRemains(existingUser, existingUser.role, "SUSPENDED");
 
   await firebaseAuth.updateUser(existingUser.firebaseUid, { disabled: true }).catch((error) => {
     console.warn("Unable to disable Firebase user:", error.message);

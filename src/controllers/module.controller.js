@@ -63,7 +63,7 @@ const archiveField = asyncHandler(async (req, res) => {
 });
 
 const listRecords = asyncHandler(async (req, res) => {
-  const result = await moduleService.listRecords(req.user, req.params.moduleKey);
+  const result = await moduleService.listRecords(req.user, req.params.moduleKey, req.query);
   res.status(200).json({ data: result });
 });
 
