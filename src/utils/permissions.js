@@ -185,9 +185,19 @@ const isKnownPermission = (permission) => allPermissions.includes(permission);
 
 const getRolePermissions = (role) => [...(ROLE_PERMISSIONS[String(role || "EMPLOYEE").toUpperCase()] || [])];
 
+/**
+ * Precedence: a per-account override wins, then the assigned role record, then the
+ * legacy enum. The enum fallback only applies to accounts written before roles became
+ * data; members on a custom role carry EMPLOYEE there, so a missing `roleRef` fails
+ * closed to no permissions rather than silently inheriting something broader.
+ */
 const resolvePermissions = (user) => {
   if (user?.usesCustomPermissions) {
     return [...new Set((user.customPermissions || []).filter(isKnownPermission))];
+  }
+
+  if (user?.roleRef) {
+    return [...new Set((user.roleRef.permissions || []).filter(isKnownPermission))];
   }
 
   return getRolePermissions(user?.role);
@@ -203,10 +213,13 @@ const getPermissionCatalog = () => ({
 });
 
 module.exports = {
+  allPermissions,
   getPermissionCatalog,
   getRolePermissions,
   hasPermission,
   isKnownPermission,
+  PERMISSION_CATALOG,
   PERMISSIONS,
   resolvePermissions,
+  ROLE_PERMISSIONS,
 };

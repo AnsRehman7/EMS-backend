@@ -149,6 +149,9 @@ model User {
   weeklyCapacityHours   Decimal    @default(40) @db.Decimal(5, 2)
   customPermissions     String[]   @default([])
   usesCustomPermissions Boolean    @default(false)
+  /// Authoritative role. The legacy `role` enum is kept only as a fail-closed
+  /// fallback and is set to EMPLOYEE for members on a custom role.
+  roleId                String?
   organizationId        String
   invitedById           String?
   createdAt             DateTime   @default(now())
@@ -161,6 +164,7 @@ model User {
   invitedBy                User?                  @relation("UserInvitations", fields: [invitedById], references: [id], onDelete: SetNull)
   invitedUsers             User[]                 @relation("UserInvitations")
   organization             Organization           @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  roleRef                  Role?                  @relation(fields: [roleId], references: [id], onDelete: SetNull)
   attendanceScans          AttendanceScan[]
   timeLogs                 TimeLog[]
   receivedNotifications    Notification[]         @relation("NotificationRecipient")
@@ -193,21 +197,25 @@ model User {
 }
 
 model Organization {
-  id           String             @id @default(cuid())
-  name         String
-  slug         String             @unique
-  status       OrganizationStatus @default(TRIAL)
-  plan         BillingPlan        @default(FREE_TRIAL)
-  trialEndsAt  DateTime
-  timezone     String             @default("Asia/Karachi")
-  workdayStart String             @default("09:00")
-  workdayEnd   String             @default("18:00")
-  weekStartsOn Int                @default(1)
-  workingDays  Int[]              @default([1, 2, 3, 4, 5])
-  holidays     String[]           @default([])
-  departments  String[]           @default([])
-  createdAt    DateTime           @default(now())
-  updatedAt    DateTime           @updatedAt
+  id                     String             @id @default(cuid())
+  name                   String
+  slug                   String             @unique
+  status                 OrganizationStatus @default(TRIAL)
+  plan                   BillingPlan        @default(FREE_TRIAL)
+  trialEndsAt            DateTime
+  timezone               String             @default("Asia/Karachi")
+  workdayStart           String             @default("09:00")
+  workdayEnd             String             @default("18:00")
+  checkInGraceMinutes    Int                @default(60)
+  checkoutWindowStart    String             @default("16:00")
+  checkoutWindowEnd      String             @default("18:00")
+  minimumOfficeMinutes   Int                @default(360)
+  weekStartsOn           Int                @default(1)
+  workingDays            Int[]              @default([1, 2, 3, 4, 5])
+  holidays               String[]           @default([])
+  departments            String[]           @default([])
+  createdAt              DateTime           @default(now())
+  updatedAt              DateTime           @updatedAt
 
   projects              Project[]
   tasks                 Task[]
@@ -225,6 +233,7 @@ model Organization {
   outboxEvents          OutboxEvent[]
   attendanceChallenges  AttendanceChallenge[]
   attendanceCorrections AttendanceCorrection[]
+  roles                 Role[]
 
   @@index([status])
   @@index([plan])
@@ -413,6 +422,48 @@ model WorkspaceOffice {
 
   @@index([organizationId, isActive])
   @@map("workspace_offices")
+}
+
+/// Workspace roles. The six system roles are seeded per organization and cannot be
+/// deleted; admins may add custom roles alongside them. `rank` encodes seniority
+/// (lower is more senior) and is what stops a role from being used to escalate.
+model Role {
+  id             String   @id @default(cuid())
+  organizationId String
+  key            String
+  name           String
+  description    String?
+  permissions    String[] @default([])
+  isSystem       Boolean  @default(false)
+  rank           Int      @default(50)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  users        User[]
+
+  @@unique([organizationId, key])
+  @@index([organizationId, rank])
+  @@map("roles")
+}
+
+/// One-time email sign-in codes. Only an HMAC of the code is stored, never the code
+/// itself, so a database leak cannot yield a usable credential.
+model LoginOtp {
+  id         String    @id @default(cuid())
+  email      String
+  codeHash   String
+  expiresAt  DateTime
+  consumedAt DateTime?
+  attempts   Int       @default(0)
+  requestIp  String?
+  userId     String?
+  createdAt  DateTime  @default(now())
+
+  @@index([email, consumedAt, expiresAt])
+  @@index([email, createdAt])
+  @@index([expiresAt])
+  @@map("login_otps")
 }
 
 model AttendanceChallenge {

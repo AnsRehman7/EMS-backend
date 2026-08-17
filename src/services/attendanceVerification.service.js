@@ -4,6 +4,8 @@ const { env } = require("../config/env");
 const ApiError = require("../utils/apiError");
 const { createForRecipients, safelyNotify } = require("./notification.service");
 const { canManageAttendance, canViewOrganizationAttendance } = require("../utils/roles");
+const { PERMISSIONS } = require("../utils/permissions");
+const { findUsersWithPermission } = require("./role.service");
 const {
   attachSystemCustomData,
   getSystemEntityData,
@@ -169,31 +171,288 @@ const listOffices = async (currentUser) => {
   return offices.map(serializeChallengeOffice);
 };
 
-const listScans = async (currentUser, { date } = {}) => {
-  const { end, start } = getDateRange(date, currentUser.organization.timezone);
+const MAX_SUMMARY_DAYS = 92;
+const DEFAULT_PAGE_SIZE = 10;
+const MAX_PAGE_SIZE = 100;
+
+const zonedFormatters = new Map();
+
+const zonedParts = (date, timeZone) => {
+  if (!zonedFormatters.has(timeZone)) {
+    zonedFormatters.set(
+      timeZone,
+      new Intl.DateTimeFormat("en-CA", {
+        day: "2-digit",
+        hour: "2-digit",
+        hour12: false,
+        minute: "2-digit",
+        month: "2-digit",
+        timeZone,
+        year: "numeric",
+      }),
+    );
+  }
+  const parts = Object.fromEntries(
+    zonedFormatters.get(timeZone).formatToParts(date).map(({ type, value }) => [type, value]),
+  );
+  const hour = Number(parts.hour) === 24 ? 0 : Number(parts.hour);
+  return {
+    dateKey: `${parts.year}-${parts.month}-${parts.day}`,
+    minutes: hour * 60 + Number(parts.minute),
+  };
+};
+
+const minutesFromClock = (value = "00:00") => {
+  const [hours, minutes] = String(value).split(":").map(Number);
+  return (Number.isFinite(hours) ? hours : 0) * 60 + (Number.isFinite(minutes) ? minutes : 0);
+};
+
+const assertDateKey = (value, label) => {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(value || ""))) {
+    throw new ApiError(400, `${label} must use YYYY-MM-DD format.`);
+  }
+  return value;
+};
+
+const eachDateKey = (fromKey, toKey) => {
+  const keys = [];
+  const cursor = new Date(`${fromKey}T00:00:00.000Z`);
+  const last = new Date(`${toKey}T00:00:00.000Z`);
+  if (Number.isNaN(cursor.getTime()) || Number.isNaN(last.getTime())) {
+    throw new ApiError(400, "Attendance date range is invalid.");
+  }
+  if (cursor > last) throw new ApiError(400, "The start date must be on or before the end date.");
+  while (cursor <= last && keys.length <= MAX_SUMMARY_DAYS) {
+    keys.push(cursor.toISOString().slice(0, 10));
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+  if (keys.length > MAX_SUMMARY_DAYS) {
+    throw new ApiError(400, `Attendance history is limited to ${MAX_SUMMARY_DAYS} days per view.`);
+  }
+  return keys;
+};
+
+const scanFilterWhere = (currentUser, { date, from, to, userId } = {}) => {
+  const timeZone = currentUser.organization.timezone;
   const canViewAll = canViewOrganizationAttendance(currentUser);
+  const range = from || to
+    ? {
+        end: getDateRange(assertDateKey(to || from, "The end date"), timeZone).end,
+        start: getDateRange(assertDateKey(from || to, "The start date"), timeZone).start,
+      }
+    : getDateRange(date, timeZone);
+
+  if (range.start >= range.end) throw new ApiError(400, "The start date must be on or before the end date.");
+
+  return {
+    organizationId: currentUser.organizationId,
+    scannedAt: { gte: range.start, lt: range.end },
+    ...(canViewAll ? (userId ? { userId } : {}) : { userId: currentUser.id }),
+  };
+};
+
+const listScans = async (currentUser, { date, from, to, userId } = {}) => {
   const scans = await prisma.attendanceScan.findMany({
     include: { office: true, user: true },
     orderBy: { scannedAt: "asc" },
-    where: {
-      organizationId: currentUser.organizationId,
-      scannedAt: { gte: start, lt: end },
-      ...(canViewAll ? {} : { userId: currentUser.id }),
-    },
+    take: 2000,
+    where: scanFilterWhere(currentUser, { date, from, to, userId }),
   });
   return attachSystemCustomData(currentUser, "attendance", scans.map(serializeScan));
 };
 
-const resolveScanUser = async (currentUser, requestedUserId) => {
-  if (!requestedUserId || requestedUserId === currentUser.id) return currentUser;
-  if (!canManageAttendance(currentUser)) {
-    throw new ApiError(403, "You can only mark attendance for your own account.");
-  }
-  const user = await prisma.user.findFirst({
-    where: { id: requestedUserId, organizationId: currentUser.organizationId, status: "ACTIVE" },
+const attendanceRules = (organization) => ({
+  checkInGraceMinutes: organization.checkInGraceMinutes ?? 60,
+  checkoutWindowEnd: organization.checkoutWindowEnd || "18:00",
+  checkoutWindowStart: organization.checkoutWindowStart || "16:00",
+  holidays: organization.holidays || [],
+  minimumOfficeMinutes: organization.minimumOfficeMinutes ?? 360,
+  officeEnd: organization.workdayEnd || "18:00",
+  officeStart: organization.workdayStart || "09:00",
+  timezone: organization.timezone,
+  workingDays: organization.workingDays?.length ? organization.workingDays : [1, 2, 3, 4, 5],
+});
+
+const buildDayRow = (member, dateKey, scans, rules) => {
+  const weekday = new Date(`${dateKey}T00:00:00.000Z`).getUTCDay();
+  const isHoliday = rules.holidays.includes(dateKey);
+  const isWorkingDay = rules.workingDays.includes(weekday);
+  const ordered = [...scans].sort((first, second) => new Date(first.scannedAt) - new Date(second.scannedAt));
+  const checkIn = ordered[0] || null;
+  const checkoutStart = minutesFromClock(rules.checkoutWindowStart);
+  const checkoutEnd = minutesFromClock(rules.checkoutWindowEnd);
+  const checkoutCandidates = ordered.filter(
+    (scan) =>
+      String(scan.direction).toUpperCase() === "OUT" &&
+      scan.minutes >= checkoutStart &&
+      scan.minutes <= checkoutEnd,
+  );
+  const checkOut = checkoutCandidates[checkoutCandidates.length - 1] || null;
+
+  let netMinutes = 0;
+  let openEntry = null;
+  ordered.forEach((scan) => {
+    const direction = String(scan.direction).toUpperCase();
+    if (direction === "IN" && !openEntry) {
+      openEntry = scan;
+      return;
+    }
+    if (direction === "OUT" && openEntry) {
+      const span = Math.round((new Date(scan.scannedAt) - new Date(openEntry.scannedAt)) / 60_000);
+      if (span > 0) netMinutes += span;
+      openEntry = null;
+    }
   });
-  if (!user) throw new ApiError(404, "Attendance user not found.");
-  return user;
+
+  const grossMinutes =
+    checkIn && checkOut
+      ? Math.max(0, Math.round((new Date(checkOut.scannedAt) - new Date(checkIn.scannedAt)) / 60_000))
+      : 0;
+  const lateThreshold = minutesFromClock(rules.officeStart) + rules.checkInGraceMinutes;
+  const lateMinutes = checkIn ? Math.max(0, checkIn.minutes - lateThreshold) : 0;
+
+  const status = !checkIn
+    ? isHoliday
+      ? "holiday"
+      : isWorkingDay
+        ? "absent"
+        : "off_day"
+    : checkOut
+      ? "checked_out"
+      : lateMinutes > 0
+        ? "late"
+        : "in_office";
+
+  return {
+    belowMinimumHours: Boolean(checkOut) && netMinutes < rules.minimumOfficeMinutes,
+    checkInAt: checkIn?.scannedAt || null,
+    checkOutAt: checkOut?.scannedAt || null,
+    date: dateKey,
+    grossMinutes,
+    id: `${member.id}:${dateKey}`,
+    isHoliday,
+    isWorkingDay,
+    lateMinutes,
+    netMinutes,
+    scanCount: ordered.length,
+    status,
+    user: {
+      department: member.department || "",
+      designation: member.designation || "",
+      email: member.email,
+      id: member.id,
+      name: member.fullName,
+      role: String(member.role).toLowerCase(),
+    },
+  };
+};
+
+const getAttendanceSummary = async (
+  currentUser,
+  { department, from, page, pageSize, search, status, to, userId } = {},
+) => {
+  const rules = attendanceRules(currentUser.organization);
+  const canViewAll = canViewOrganizationAttendance(currentUser);
+  const today = currentDateKey(rules.timezone);
+  const toKey = assertDateKey(to || from || today, "The end date");
+  const fromKey = assertDateKey(from || toKey, "The start date");
+  const dateKeys = eachDateKey(fromKey, toKey);
+  const scopedUserId = canViewAll ? userId || "" : currentUser.id;
+
+  const [members, scans] = await Promise.all([
+    prisma.user.findMany({
+      orderBy: { fullName: "asc" },
+      select: {
+        department: true,
+        designation: true,
+        email: true,
+        fullName: true,
+        id: true,
+        role: true,
+      },
+      where: {
+        organizationId: currentUser.organizationId,
+        status: "ACTIVE",
+        ...(scopedUserId ? { id: scopedUserId } : {}),
+        ...(department ? { department } : {}),
+      },
+    }),
+    prisma.attendanceScan.findMany({
+      orderBy: { scannedAt: "asc" },
+      select: { accepted: true, direction: true, id: true, scannedAt: true, userId: true },
+      where: {
+        accepted: true,
+        organizationId: currentUser.organizationId,
+        scannedAt: {
+          gte: getDateRange(fromKey, rules.timezone).start,
+          lt: getDateRange(toKey, rules.timezone).end,
+        },
+        ...(scopedUserId ? { userId: scopedUserId } : {}),
+      },
+    }),
+  ]);
+
+  const query = String(search || "").trim().toLowerCase();
+  const visibleMembers = query
+    ? members.filter((member) =>
+        [member.fullName, member.email, member.department, member.designation]
+          .filter(Boolean)
+          .some((value) => value.toLowerCase().includes(query)),
+      )
+    : members;
+
+  const scansByUserDay = new Map();
+  scans.forEach((scan) => {
+    const { dateKey, minutes } = zonedParts(scan.scannedAt, rules.timezone);
+    const key = `${scan.userId}:${dateKey}`;
+    if (!scansByUserDay.has(key)) scansByUserDay.set(key, []);
+    scansByUserDay.get(key).push({ ...scan, minutes });
+  });
+
+  const rows = [];
+  [...dateKeys].reverse().forEach((dateKey) => {
+    visibleMembers.forEach((member) => {
+      rows.push(buildDayRow(member, dateKey, scansByUserDay.get(`${member.id}:${dateKey}`) || [], rules));
+    });
+  });
+
+  const filteredRows = status && status !== "all" ? rows.filter((row) => row.status === status) : rows;
+  const totals = filteredRows.reduce(
+    (accumulator, row) => ({
+      absent: accumulator.absent + (row.status === "absent" ? 1 : 0),
+      checkedIn: accumulator.checkedIn + (row.checkInAt ? 1 : 0),
+      checkedOut: accumulator.checkedOut + (row.checkOutAt ? 1 : 0),
+      late: accumulator.late + (row.lateMinutes > 0 ? 1 : 0),
+      netMinutes: accumulator.netMinutes + row.netMinutes,
+    }),
+    { absent: 0, checkedIn: 0, checkedOut: 0, late: 0, netMinutes: 0 },
+  );
+
+  const size = Math.min(Math.max(Number(pageSize) || DEFAULT_PAGE_SIZE, 1), MAX_PAGE_SIZE);
+  const totalPages = Math.max(1, Math.ceil(filteredRows.length / size));
+  const currentPage = Math.min(Math.max(Number(page) || 1, 1), totalPages);
+  const offset = (currentPage - 1) * size;
+
+  return {
+    pagination: {
+      page: currentPage,
+      pageSize: size,
+      total: filteredRows.length,
+      totalPages,
+    },
+    range: { from: fromKey, to: toKey },
+    rows: filteredRows.slice(offset, offset + size),
+    rules: {
+      checkInGraceMinutes: rules.checkInGraceMinutes,
+      checkoutWindowEnd: rules.checkoutWindowEnd,
+      checkoutWindowStart: rules.checkoutWindowStart,
+      minimumOfficeMinutes: rules.minimumOfficeMinutes,
+      officeEnd: rules.officeEnd,
+      officeStart: rules.officeStart,
+      timezone: rules.timezone,
+    },
+    totals,
+  };
 };
 
 const createScan = async (currentUser, payload) => {
@@ -202,72 +461,72 @@ const createScan = async (currentUser, payload) => {
     systemKey: "attendance",
     values: payload.customFields,
   });
-  const scanUser = await resolveScanUser(currentUser, payload.userId);
-  const isVerifiedSelfScan =
-    scanUser.id === currentUser.id &&
-    (!canManageAttendance(currentUser) || Boolean(payload.challengeToken));
+
+  if (payload.userId && payload.userId !== currentUser.id) {
+    throw new ApiError(
+      403,
+      "Attendance can only be recorded from a verified device. Use an attendance correction to adjust another member's record.",
+    );
+  }
+
+  const scanUser = currentUser;
   const direction = normalizeDirection(payload.direction);
-  const scannedAt = isVerifiedSelfScan ? new Date() : payload.scannedAt ? new Date(payload.scannedAt) : new Date();
-  if (Number.isNaN(scannedAt.getTime())) throw new ApiError(400, "Scan time must be a valid date.");
+  const scannedAt = new Date();
   const offices = await activeOffices(currentUser.organizationId);
   let nearestOffice = null;
   let measuredDistance = null;
   let rejectionReason = null;
 
-  if (isVerifiedSelfScan) {
-    if (!payload.challengeToken) throw new ApiError(400, "Start a fresh attendance check before scanning.");
-    if (!offices.length) throw new ApiError(503, "No active attendance office is configured for this workspace.");
-    if (payload.latitude === undefined || payload.longitude === undefined) {
-      throw new ApiError(422, "A precise device location is required for attendance.");
-    }
-    const measured = offices
-      .map((office) => ({ distance: distanceMeters(payload.latitude, payload.longitude, office), office }))
-      .sort((first, second) => first.distance - second.distance)[0];
-    nearestOffice = measured.office;
-    measuredDistance = measured.distance;
-    if (payload.accuracyMeters === undefined) {
-      rejectionReason = "Location accuracy was not provided by the device.";
-    } else if (payload.accuracyMeters > nearestOffice.maxAccuracyMeters) {
-      rejectionReason = `Location accuracy must be within ${nearestOffice.maxAccuracyMeters} meters.`;
-    } else if (measuredDistance > nearestOffice.radiusMeters) {
-      rejectionReason = `Outside ${nearestOffice.name} by ${Math.round(measuredDistance - nearestOffice.radiusMeters)} meters.`;
-    }
+  if (!payload.challengeToken) throw new ApiError(400, "Start a fresh attendance check before scanning.");
+  if (!offices.length) throw new ApiError(503, "No active attendance office is configured for this workspace.");
+  if (payload.latitude === undefined || payload.longitude === undefined) {
+    throw new ApiError(422, "A precise device location is required for attendance.");
+  }
+
+  const measured = offices
+    .map((office) => ({ distance: distanceMeters(payload.latitude, payload.longitude, office), office }))
+    .sort((first, second) => first.distance - second.distance)[0];
+  nearestOffice = measured.office;
+  measuredDistance = measured.distance;
+  if (payload.accuracyMeters === undefined) {
+    rejectionReason = "Location accuracy was not provided by the device.";
+  } else if (payload.accuracyMeters > nearestOffice.maxAccuracyMeters) {
+    rejectionReason = `Location accuracy must be within ${nearestOffice.maxAccuracyMeters} meters.`;
+  } else if (measuredDistance > nearestOffice.radiusMeters) {
+    rejectionReason = `Outside ${nearestOffice.name} by ${Math.round(measuredDistance - nearestOffice.radiusMeters)} meters.`;
   }
 
   await validateSystemFields({
     currentUser,
     systemKey: "attendance",
-    values: { ...payload, scannedAt, source: isVerifiedSelfScan ? "mobile_verified" : "admin_manual", userId: scanUser.id },
+    values: { ...payload, scannedAt, source: "mobile_verified", userId: scanUser.id },
   });
 
   const scanResult = await prisma.$transaction(async (transaction) => {
-    let challengeId = null;
-    if (isVerifiedSelfScan) {
-      const challenge = await transaction.attendanceChallenge.findFirst({
-        include: { scan: { include: { office: true, user: true } } },
-        where: {
-          organizationId: currentUser.organizationId,
-          tokenHash: hashToken(payload.challengeToken),
-          userId: currentUser.id,
-        },
-      });
-      if (!challenge) throw new ApiError(409, "Attendance check is invalid. Start again.");
-      if (challenge.usedAt) {
-        if (challenge.scan && challenge.scan.direction === direction) {
-          return { replayed: true, scan: challenge.scan };
-        }
-        throw new ApiError(409, "Attendance check was already used. Start again.");
+    const challenge = await transaction.attendanceChallenge.findFirst({
+      include: { scan: { include: { office: true, user: true } } },
+      where: {
+        organizationId: currentUser.organizationId,
+        tokenHash: hashToken(payload.challengeToken),
+        userId: currentUser.id,
+      },
+    });
+    if (!challenge) throw new ApiError(409, "Attendance check is invalid. Start again.");
+    if (challenge.usedAt) {
+      if (challenge.scan && challenge.scan.direction === direction) {
+        return { replayed: true, scan: challenge.scan };
       }
-      if (challenge.expiresAt <= new Date()) {
-        throw new ApiError(409, "Attendance check expired. Start again.");
-      }
-      const claimed = await transaction.attendanceChallenge.updateMany({
-        data: { usedAt: new Date() },
-        where: { id: challenge.id, usedAt: null },
-      });
-      if (claimed.count !== 1) throw new ApiError(409, "Attendance check was already used.");
-      challengeId = challenge.id;
+      throw new ApiError(409, "Attendance check was already used. Start again.");
     }
+    if (challenge.expiresAt <= new Date()) {
+      throw new ApiError(409, "Attendance check expired. Start again.");
+    }
+    const claimed = await transaction.attendanceChallenge.updateMany({
+      data: { usedAt: new Date() },
+      where: { id: challenge.id, usedAt: null },
+    });
+    if (claimed.count !== 1) throw new ApiError(409, "Attendance check was already used.");
+    const challengeId = challenge.id;
 
     const { end, start } = getDateRange(
       currentDateKey(currentUser.organization.timezone, scannedAt),
@@ -277,13 +536,13 @@ const createScan = async (currentUser, payload) => {
       orderBy: { scannedAt: "desc" },
       where: { accepted: true, scannedAt: { gte: start, lt: end }, userId: scanUser.id },
     });
-    if (isVerifiedSelfScan && previous && scannedAt.getTime() - previous.scannedAt.getTime() < SCAN_COOLDOWN_MS) {
+    if (previous && scannedAt.getTime() - previous.scannedAt.getTime() < SCAN_COOLDOWN_MS) {
       throw new ApiError(429, "Please wait 30 seconds before another attendance scan.");
     }
-    if (isVerifiedSelfScan && previous?.direction === direction) {
+    if (previous?.direction === direction) {
       throw new ApiError(409, `You are already checked ${direction === "IN" ? "in" : "out"}.`);
     }
-    if (isVerifiedSelfScan && !previous && direction === "OUT") {
+    if (!previous && direction === "OUT") {
       throw new ApiError(409, "Check in before checking out.");
     }
 
@@ -300,7 +559,7 @@ const createScan = async (currentUser, payload) => {
         organizationId: currentUser.organizationId,
         rejectionReason,
         scannedAt,
-        source: isVerifiedSelfScan ? "mobile_verified" : "admin_manual",
+        source: "mobile_verified",
         userId: scanUser.id,
       },
       include: { office: true, user: true },
@@ -345,18 +604,28 @@ const serializeCorrection = (correction) => ({
   status: String(correction.status).toLowerCase(),
 });
 
-const listCorrections = async (currentUser) => {
+const listCorrections = async (currentUser, { page, pageSize, status } = {}) => {
   const canViewAll = canManageAttendance(currentUser);
+  const size = Math.min(Math.max(Number(pageSize) || DEFAULT_PAGE_SIZE, 1), MAX_PAGE_SIZE);
+  const where = {
+    organizationId: currentUser.organizationId,
+    ...(canViewAll ? {} : { requesterId: currentUser.id }),
+    ...(status && status !== "all" ? { status: String(status).toUpperCase() } : {}),
+  };
+  const total = await prisma.attendanceCorrection.count({ where });
+  const totalPages = Math.max(1, Math.ceil(total / size));
+  const currentPage = Math.min(Math.max(Number(page) || 1, 1), totalPages);
   const corrections = await prisma.attendanceCorrection.findMany({
     include: { requester: true, reviewer: true },
     orderBy: { createdAt: "desc" },
-    take: 200,
-    where: {
-      organizationId: currentUser.organizationId,
-      ...(canViewAll ? {} : { requesterId: currentUser.id }),
-    },
+    skip: (currentPage - 1) * size,
+    take: size,
+    where,
   });
-  return corrections.map(serializeCorrection);
+  return {
+    corrections: corrections.map(serializeCorrection),
+    pagination: { page: currentPage, pageSize: size, total, totalPages },
+  };
 };
 
 const createCorrection = async (currentUser, payload) => {
@@ -405,10 +674,8 @@ const createCorrection = async (currentUser, payload) => {
     });
     return created;
   });
-  const reviewers = await prisma.user.findMany({
-    select: { id: true },
-    where: { organizationId: currentUser.organizationId, role: { in: ["SUPER_ADMIN", "ADMIN", "HR"] }, status: "ACTIVE" },
-  });
+  // Whoever actually holds attendance management, including custom roles.
+  const reviewers = await findUsersWithPermission(currentUser.organizationId, PERMISSIONS.ATTENDANCE_MANAGE);
   await safelyNotify(() => createForRecipients({
     actor: currentUser,
     notification: {
@@ -485,6 +752,7 @@ const reviewCorrection = async (currentUser, correctionId, payload) => {
 module.exports = {
   createCorrection,
   createScan,
+  getAttendanceSummary,
   issueChallenge,
   listOffices,
   listCorrections,

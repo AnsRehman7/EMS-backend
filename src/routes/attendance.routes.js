@@ -9,6 +9,7 @@ router.use(authenticate);
 router.post("/challenge", attendanceController.issueChallenge);
 router.get("/offices", attendanceController.listOffices);
 router.get("/scans", attendanceController.listScans);
+router.get("/summary", attendanceController.getSummary);
 router.post("/scans", attendanceController.createScan);
 router.get("/corrections", attendanceController.listCorrections);
 router.post("/corrections", attendanceController.createCorrection);

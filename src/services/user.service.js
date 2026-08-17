@@ -12,15 +12,19 @@ const {
 } = require("../utils/permissions");
 const {
   canAssignRole,
+  canManageAttendance,
   canManageBilling,
   canManageUsers,
   canManageWork,
+  canViewOrganizationAttendance,
   canViewOrganizationWork,
   normalizeRole,
+  roleKeyOf,
   toClientRole,
   USER_ROLES,
 } = require("../utils/roles");
 const { safelyRecordAudit } = require("./audit.service");
+const { ensureSystemRoles, resolveAssignableRole } = require("./role.service");
 const {
   attachSystemCustomData,
   getSystemEntityData,
@@ -46,7 +50,11 @@ const serializeUser = (user) => {
   name: user.fullName,
   organization: user.organization
     ? {
+        checkInGraceMinutes: user.organization.checkInGraceMinutes,
+        checkoutWindowEnd: user.organization.checkoutWindowEnd,
+        checkoutWindowStart: user.organization.checkoutWindowStart,
         id: user.organization.id,
+        minimumOfficeMinutes: user.organization.minimumOfficeMinutes,
         name: user.organization.name,
         plan: String(user.organization.plan).toLowerCase(),
         slug: user.organization.slug,
@@ -69,10 +77,10 @@ const serializeUser = (user) => {
     canDeleteTasks: hasPermission(user, PERMISSIONS.TASKS_DELETE),
     canEditProjects: hasPermission(user, PERMISSIONS.PROJECTS_EDIT),
     canEditTasks: hasPermission(user, PERMISSIONS.TASKS_EDIT),
+    canManageAttendance: canManageAttendance(user),
     canManageBilling: canManageBilling(user),
     canManageCustomization:
-      user.role === USER_ROLES.SUPER_ADMIN &&
-      hasPermission(user, PERMISSIONS.CUSTOMIZATION_MANAGE),
+      roleKeyOf(user) === "super_admin" && hasPermission(user, PERMISSIONS.CUSTOMIZATION_MANAGE),
     canManagePermissions: hasPermission(user, PERMISSIONS.PERMISSIONS_MANAGE),
     canManageSettings: hasPermission(user, PERMISSIONS.SETTINGS_MANAGE),
     canManageUsers: canManageUsers(user),
@@ -81,10 +89,14 @@ const serializeUser = (user) => {
     canViewDashboard: hasPermission(user, PERMISSIONS.DASHBOARD_VIEW),
     canViewAudit: hasPermission(user, PERMISSIONS.AUDIT_VIEW),
     canViewReports: hasPermission(user, PERMISSIONS.REPORTS_VIEW),
+    canViewAllAttendance: canViewOrganizationAttendance(user),
     canViewOrganizationWork: canViewOrganizationWork(user),
     usesRoleDefaults: !user.usesCustomPermissions,
   },
-  role: toClientRole(user.role),
+  role: roleKeyOf(user),
+  roleId: user.roleId || "",
+  roleName: user.roleRef?.name || toClientRole(user.role).replace(/_/g, " "),
+  roleRank: user.roleRef?.rank ?? null,
   skills: user.skills || [],
   status: String(user.status || "ACTIVE").toLowerCase(),
   uid: user.firebaseUid,
@@ -129,11 +141,11 @@ const ensureOrganization = (currentUser) => {
   }
 };
 
-const ensureActiveSuperAdminRemains = async (existingUser, nextRole, nextStatus) => {
+const ensureActiveSuperAdminRemains = async (existingUser, nextRoleKey, nextStatus) => {
   const removesActiveSuperAdmin =
-    existingUser.role === USER_ROLES.SUPER_ADMIN &&
+    roleKeyOf(existingUser) === "super_admin" &&
     existingUser.status === "ACTIVE" &&
-    (nextRole !== USER_ROLES.SUPER_ADMIN || nextStatus !== "ACTIVE");
+    (nextRoleKey !== "super_admin" || nextStatus !== "ACTIVE");
   if (!removesActiveSuperAdmin) return;
 
   const candidates = await prisma.user.findMany({
@@ -141,7 +153,7 @@ const ensureActiveSuperAdminRemains = async (existingUser, nextRole, nextStatus)
     where: {
       id: { not: existingUser.id },
       organizationId: existingUser.organizationId,
-      role: USER_ROLES.SUPER_ADMIN,
+      roleRef: { key: "super_admin" },
       status: "ACTIVE",
     },
   });
@@ -189,8 +201,8 @@ const syncUserProfile = async (firebaseUser, payload = {}) => {
   }
 
   const [userByUid, userByEmail] = await Promise.all([
-    prisma.user.findUnique({ include: { organization: true }, where: { firebaseUid } }),
-    prisma.user.findUnique({ include: { organization: true }, where: { email } }),
+    prisma.user.findUnique({ include: { organization: true, roleRef: true }, where: { firebaseUid } }),
+    prisma.user.findUnique({ include: { organization: true, roleRef: true }, where: { email } }),
   ]);
 
   if (userByUid && userByEmail && userByUid.id !== userByEmail.id) {
@@ -221,6 +233,7 @@ const syncUserProfile = async (firebaseUser, payload = {}) => {
       },
       include: {
         organization: true,
+        roleRef: true,
       },
       where: { id: existingUser.id },
     });
@@ -242,6 +255,9 @@ const syncUserProfile = async (firebaseUser, payload = {}) => {
       },
     });
 
+    const roles = await ensureSystemRoles(tx, organization.id);
+    const superAdminRole = roles.find((role) => role.key === "super_admin");
+
     return tx.user.create({
       data: {
         contact: payload.contact || "",
@@ -252,9 +268,11 @@ const syncUserProfile = async (firebaseUser, payload = {}) => {
         fullName: payload.fullName || firebaseUser.name || email,
         organizationId: organization.id,
         role: USER_ROLES.SUPER_ADMIN,
+        roleId: superAdminRole?.id || null,
       },
       include: {
         organization: true,
+        roleRef: true,
       },
     });
   });
@@ -315,6 +333,7 @@ const updateCurrentProfile = async (currentUser, payload) => {
     },
     include: {
       organization: true,
+      roleRef: true,
     },
     where: { id: currentUser.id },
   });
@@ -359,6 +378,7 @@ const listEmployees = async (currentUser) => {
     },
     include: {
       organization: true,
+      roleRef: true,
     },
   });
 
@@ -375,6 +395,7 @@ const listUsers = async (currentUser) => {
     },
     include: {
       organization: true,
+      roleRef: true,
     },
   });
 
@@ -391,10 +412,21 @@ const assertCanManageUser = (actor, targetRole) => {
   }
 };
 
+/**
+ * Resolves a role key to the workspace's role record and confirms the actor may hand
+ * it out. Custom roles carry EMPLOYEE in the legacy enum column so that any code path
+ * still reading the enum fails closed rather than inheriting a broader role.
+ */
+const resolveRoleAssignment = async (currentUser, roleKey) => {
+  const role = await resolveAssignableRole(currentUser, roleKey);
+  assertCanManageUser(currentUser, role);
+  return { enumRole: role.isSystem ? normalizeRole(role.key) : USER_ROLES.EMPLOYEE, role };
+};
+
 const createOrganizationUser = async (currentUser, payload) => {
   ensureOrganization(currentUser);
-  const role = normalizeRole(payload.role);
-  assertCanManageUser(currentUser, role);
+  const { enumRole, role: roleRecord } = await resolveRoleAssignment(currentUser, payload.role);
+  const role = enumRole;
   const customFields = await validateSystemCustomValues({
     currentUser,
     systemKey: "users",
@@ -436,11 +468,13 @@ const createOrganizationUser = async (currentUser, payload) => {
         invitedById: currentUser.id,
         organizationId: currentUser.organizationId,
         role,
+        roleId: roleRecord.id,
         skills: payload.skills || [],
         weeklyCapacityHours: payload.weeklyCapacityHours || 40,
       },
       include: {
         organization: true,
+        roleRef: true,
       },
     });
 
@@ -482,6 +516,7 @@ const getManagedUser = async (currentUser, userId) => {
   const user = await prisma.user.findFirst({
     include: {
       organization: true,
+      roleRef: true,
     },
     where: {
       id: userId,
@@ -511,15 +546,20 @@ const updateOrganizationUser = async (currentUser, userId, payload) => {
           systemKey: "users",
           values: payload.customFields,
         });
-  const nextRole = payload.role ? normalizeRole(payload.role) : existingUser.role;
+  const existingRoleKey = roleKeyOf(existingUser);
 
-  if (existingUser.role === USER_ROLES.SUPER_ADMIN && currentUser.role !== USER_ROLES.SUPER_ADMIN) {
+  if (existingRoleKey === "super_admin" && roleKeyOf(currentUser) !== "super_admin") {
     throw new ApiError(403, "Only a super admin can manage another super admin.");
   }
 
-  assertCanManageUser(currentUser, nextRole);
+  const roleAssignment = payload.role ? await resolveRoleAssignment(currentUser, payload.role) : null;
+  const nextRole = roleAssignment ? roleAssignment.enumRole : existingUser.role;
+  const nextRoleKey = roleAssignment ? roleAssignment.role.key : existingRoleKey;
+  const nextRoleId = roleAssignment ? roleAssignment.role.id : existingUser.roleId;
 
-  if (currentUser.role === USER_ROLES.HR && existingUser.role !== USER_ROLES.EMPLOYEE) {
+  if (!roleAssignment) assertCanManageUser(currentUser, existingUser.roleRef || existingRoleKey);
+
+  if (roleKeyOf(currentUser) === "hr" && existingRoleKey !== "employee") {
     throw new ApiError(403, "HR can manage employee accounts only.");
   }
 
@@ -535,7 +575,7 @@ const updateOrganizationUser = async (currentUser, userId, payload) => {
       throw new ApiError(409, "Another workspace account already uses this email address.");
     }
   }
-  await ensureActiveSuperAdminRemains(existingUser, nextRole, nextStatus);
+  await ensureActiveSuperAdminRemains(existingUser, nextRoleKey, nextStatus);
   await validateSystemFields({
     currentUser,
     systemKey: "users",
@@ -576,15 +616,17 @@ const updateOrganizationUser = async (currentUser, userId, payload) => {
       email: nextEmail,
       fullName: payload.fullName || existingUser.fullName,
       role: nextRole,
+      roleId: nextRoleId,
       ...(payload.skills !== undefined ? { skills: payload.skills } : {}),
       status: nextStatus,
       ...(payload.weeklyCapacityHours !== undefined ? { weeklyCapacityHours: payload.weeklyCapacityHours } : {}),
-      ...(payload.role && nextRole !== existingUser.role
+      ...(payload.role && nextRoleKey !== existingRoleKey
         ? { customPermissions: [], usesCustomPermissions: false }
         : {}),
     },
     include: {
       organization: true,
+      roleRef: true,
     },
     where: { id: existingUser.id },
   });
@@ -635,7 +677,7 @@ const getWorkspacePermissionCatalog = (currentUser) => {
 };
 
 const updateUserPermissions = async (currentUser, userId, payload) => {
-  if (![USER_ROLES.SUPER_ADMIN, USER_ROLES.ADMIN].includes(currentUser.role)) {
+  if (!hasPermission(currentUser, PERMISSIONS.PERMISSIONS_MANAGE)) {
     throw new ApiError(403, "Only workspace administrators can customize permissions.");
   }
 
@@ -645,7 +687,7 @@ const updateUserPermissions = async (currentUser, userId, payload) => {
 
   const existingUser = await getManagedUser(currentUser, userId);
 
-  if (existingUser.role === USER_ROLES.SUPER_ADMIN && currentUser.role !== USER_ROLES.SUPER_ADMIN) {
+  if (roleKeyOf(existingUser) === "super_admin" && roleKeyOf(currentUser) !== "super_admin") {
     throw new ApiError(403, "Only a super admin can change super admin permissions.");
   }
 
@@ -658,13 +700,13 @@ const updateUserPermissions = async (currentUser, userId, payload) => {
     throw new ApiError(400, "One or more selected permissions are not supported.");
   }
   if (
-    existingUser.role !== USER_ROLES.SUPER_ADMIN &&
+    roleKeyOf(existingUser) !== "super_admin" &&
     requestedPermissions.includes(PERMISSIONS.CUSTOMIZATION_MANAGE)
   ) {
     throw new ApiError(400, "Module customization is reserved for super admin accounts.");
   }
   if (
-    existingUser.role === USER_ROLES.SUPER_ADMIN &&
+    roleKeyOf(existingUser) === "super_admin" &&
     !payload.useRoleDefaults &&
     ![PERMISSIONS.USERS_MANAGE, PERMISSIONS.PERMISSIONS_MANAGE].every((permission) =>
       requestedPermissions.includes(permission),
@@ -678,7 +720,7 @@ const updateUserPermissions = async (currentUser, userId, payload) => {
 
   const actorPermissions = resolvePermissions(currentUser);
   if (
-    currentUser.role !== USER_ROLES.SUPER_ADMIN &&
+    roleKeyOf(currentUser) !== "super_admin" &&
     requestedPermissions.some((permission) => !actorPermissions.includes(permission))
   ) {
     throw new ApiError(403, "You cannot grant a permission that your own account does not have.");
@@ -690,6 +732,7 @@ const updateUserPermissions = async (currentUser, userId, payload) => {
       : { customPermissions: requestedPermissions, usesCustomPermissions: true },
     include: {
       organization: true,
+      roleRef: true,
     },
     where: { id: existingUser.id },
   });
@@ -712,17 +755,17 @@ const updateUserPermissions = async (currentUser, userId, payload) => {
 const deleteOrganizationUser = async (currentUser, userId) => {
   const existingUser = await getManagedUser(currentUser, userId);
 
-  if (existingUser.role === USER_ROLES.SUPER_ADMIN && currentUser.role !== USER_ROLES.SUPER_ADMIN) {
+  if (roleKeyOf(existingUser) === "super_admin" && roleKeyOf(currentUser) !== "super_admin") {
     throw new ApiError(403, "Only a super admin can suspend another super admin.");
   }
 
-  assertCanManageUser(currentUser, existingUser.role);
+  assertCanManageUser(currentUser, existingUser.roleRef || roleKeyOf(existingUser));
 
   if (currentUser.id === existingUser.id) {
     throw new ApiError(400, "You cannot delete your own account.");
   }
 
-  await ensureActiveSuperAdminRemains(existingUser, existingUser.role, "SUSPENDED");
+  await ensureActiveSuperAdminRemains(existingUser, roleKeyOf(existingUser), "SUSPENDED");
 
   await firebaseAuth.updateUser(existingUser.firebaseUid, { disabled: true }).catch((error) => {
     console.warn("Unable to disable Firebase user:", error.message);
@@ -732,6 +775,7 @@ const deleteOrganizationUser = async (currentUser, userId) => {
     data: { status: "SUSPENDED" },
     include: {
       organization: true,
+      roleRef: true,
     },
     where: { id: existingUser.id },
   });

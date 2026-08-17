@@ -1,6 +1,7 @@
 const prisma = require("../db/prisma");
 const ApiError = require("../utils/apiError");
 const { hasPermission, PERMISSIONS } = require("../utils/permissions");
+const { roleKeyOf } = require("../utils/roles");
 const { safelyRecordAudit } = require("./audit.service");
 
 const ALL_ROLES = ["super_admin", "admin", "manager", "hr", "accounts", "employee"];
@@ -119,10 +120,12 @@ const moduleInclude = {
   },
 };
 
-const actorRole = (currentUser) => String(currentUser?.role || "EMPLOYEE").toLowerCase();
+// Module access lists are keyed by role key, so they must accept workspace-defined
+// roles and not just the six built-ins.
+const actorRole = (currentUser) => roleKeyOf(currentUser);
 const normalizeRoles = (roles = []) =>
   [...new Set(roles.map((role) => String(role).trim().toLowerCase()))].filter((role) =>
-    ALL_ROLES.includes(role),
+    /^[a-z][a-z0-9_]*$/.test(role),
   );
 const normalizeType = (type) => String(type || "TEXT").trim().toUpperCase();
 const isMissing = (value) =>

@@ -9,8 +9,10 @@ const {
   customRecordSchema,
   generateProjectPlanSchema,
   updateCustomFieldSchema,
+  requestSignInCodeSchema,
   updateTaskSchema,
   updateWorkspaceSettingsSchema,
+  verifySignInCodeSchema,
 } = require("../src/utils/validators");
 const { normalizeTaskPlan } = require("../src/services/projectPlanning.service");
 
@@ -66,6 +68,47 @@ test("workspace schedule rejects an inverted workday", () => {
 
   assert.equal(result.success, false);
   assert.ok(result.error.flatten().fieldErrors.workdayEnd?.length);
+});
+
+test("sign-in code requests normalize the email and reject malformed addresses", () => {
+  assert.equal(requestSignInCodeSchema.parse({ email: "  Owner@Company.COM " }).email, "owner@company.com");
+  assert.equal(requestSignInCodeSchema.safeParse({ email: "not-an-email" }).success, false);
+});
+
+test("sign-in code verification requires exactly six digits", () => {
+  const accepted = verifySignInCodeSchema.parse({ code: " 048213 ", email: "Owner@Company.com" });
+  assert.equal(accepted.code, "048213");
+  assert.equal(accepted.email, "owner@company.com");
+
+  for (const code of ["12345", "1234567", "12a456", ""]) {
+    assert.equal(verifySignInCodeSchema.safeParse({ code, email: "owner@company.com" }).success, false);
+  }
+});
+
+test("attendance rules reject an inverted checkout window and out-of-range grace", () => {
+  const result = updateWorkspaceSettingsSchema.safeParse({
+    checkInGraceMinutes: 900,
+    checkoutWindowEnd: "16:00",
+    checkoutWindowStart: "18:00",
+  });
+
+  assert.equal(result.success, false);
+  const fields = result.error.flatten().fieldErrors;
+  assert.ok(fields.checkoutWindowEnd?.length);
+  assert.ok(fields.checkInGraceMinutes?.length);
+});
+
+test("attendance rules accept a valid policy and coerce numeric minutes", () => {
+  const result = updateWorkspaceSettingsSchema.parse({
+    checkInGraceMinutes: "45",
+    checkoutWindowEnd: "18:30",
+    checkoutWindowStart: "16:00",
+    minimumOfficeMinutes: "420",
+  });
+
+  assert.equal(result.checkInGraceMinutes, 45);
+  assert.equal(result.minimumOfficeMinutes, 420);
+  assert.equal(result.checkoutWindowStart, "16:00");
 });
 
 test("workspace schedule rejects invalid calendars and timezones", () => {

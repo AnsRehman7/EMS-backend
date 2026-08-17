@@ -2,6 +2,7 @@ const { firebaseAppCheck, firebaseAuth } = require("../config/firebaseAdmin");
 const { env } = require("../config/env");
 const prisma = require("../db/prisma");
 const ApiError = require("../utils/apiError");
+const { USER_ROLES } = require("../utils/roles");
 
 const getBearerToken = (req) => {
   const header = req.headers.authorization || "";
@@ -28,11 +29,43 @@ const authenticateFirebase = async (req, _res, next) => {
   }
 };
 
+/**
+ * Firebase ID tokens live one hour and refresh silently, so the workspace session
+ * length is enforced from `auth_time` (the original sign-in, which refreshes do not
+ * move) rather than from token expiry.
+ *
+ * Sign-in method is enforced here too: email codes mint a custom token, so `custom`
+ * is the normal path. Password sign-in survives only for the super admin as a
+ * break-glass route in case email delivery fails.
+ */
+const enforceSessionPolicy = (decodedToken, currentUser) => {
+  const authTimeSeconds = Number(decodedToken?.auth_time || 0);
+  const maxAgeSeconds = env.sessionMaxDays * 24 * 60 * 60;
+
+  if (authTimeSeconds && Date.now() / 1000 - authTimeSeconds > maxAgeSeconds) {
+    throw new ApiError(401, `Your ${env.sessionMaxDays}-day session expired. Sign in again to continue.`);
+  }
+
+  const provider = String(decodedToken?.firebase?.sign_in_provider || "");
+
+  if (provider === "custom") return;
+
+  if (provider === "password") {
+    if (currentUser.role !== USER_ROLES.SUPER_ADMIN) {
+      throw new ApiError(401, "Password sign-in is disabled. Sign in with the code sent to your email.");
+    }
+    return;
+  }
+
+  throw new ApiError(401, "This sign-in method is no longer supported. Sign in with the code sent to your email.");
+};
+
 const attachCurrentUser = async (req, _res, next) => {
   try {
     const currentUser = await prisma.user.findUnique({
       include: {
         organization: true,
+        roleRef: true,
       },
       where: { firebaseUid: req.firebaseUser.uid },
     });
@@ -44,6 +77,8 @@ const attachCurrentUser = async (req, _res, next) => {
     if (currentUser.status === "SUSPENDED") {
       throw new ApiError(403, "This account is suspended. Contact your workspace administrator.");
     }
+
+    enforceSessionPolicy(req.firebaseUser, currentUser);
 
     req.user = currentUser;
     next();
@@ -70,4 +105,5 @@ const authenticate = [authenticateFirebase, verifyAppCheck, attachCurrentUser];
 module.exports = {
   authenticate,
   authenticateFirebase,
+  enforceSessionPolicy,
 };

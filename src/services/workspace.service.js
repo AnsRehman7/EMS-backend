@@ -16,10 +16,14 @@ const assertTimezone = (timezone) => {
 };
 
 const serializeOrganization = (organization, inferredDepartments = []) => ({
+  checkInGraceMinutes: organization.checkInGraceMinutes,
+  checkoutWindowEnd: organization.checkoutWindowEnd,
+  checkoutWindowStart: organization.checkoutWindowStart,
   createdAt: organization.createdAt,
   departments: normalizeDepartments([...(organization.departments || []), ...inferredDepartments]),
   holidays: [...new Set(organization.holidays || [])].sort(),
   id: organization.id,
+  minimumOfficeMinutes: organization.minimumOfficeMinutes,
   name: organization.name,
   plan: String(organization.plan).toLowerCase(),
   slug: organization.slug,
@@ -153,14 +157,24 @@ const updateWorkspaceSettings = async (currentUser, payload) => {
   const timezone = payload.timezone || existing.timezone;
   const workdayStart = payload.workdayStart || existing.workdayStart;
   const workdayEnd = payload.workdayEnd || existing.workdayEnd;
+  const checkoutWindowStart = payload.checkoutWindowStart || existing.checkoutWindowStart;
+  const checkoutWindowEnd = payload.checkoutWindowEnd || existing.checkoutWindowEnd;
   assertTimezone(timezone);
 
   if (workdayStart >= workdayEnd) {
     throw new ApiError(400, "Workday end must be later than workday start.");
   }
 
+  if (checkoutWindowStart >= checkoutWindowEnd) {
+    throw new ApiError(400, "The checkout window must end later than it starts.");
+  }
+
   const data = {
+    ...(payload.checkInGraceMinutes !== undefined ? { checkInGraceMinutes: payload.checkInGraceMinutes } : {}),
+    ...(payload.checkoutWindowEnd !== undefined ? { checkoutWindowEnd } : {}),
+    ...(payload.checkoutWindowStart !== undefined ? { checkoutWindowStart } : {}),
     ...(payload.departments !== undefined ? { departments: normalizeDepartments(payload.departments) } : {}),
+    ...(payload.minimumOfficeMinutes !== undefined ? { minimumOfficeMinutes: payload.minimumOfficeMinutes } : {}),
     ...(payload.holidays !== undefined ? { holidays: [...new Set(payload.holidays)].sort() } : {}),
     ...(payload.name !== undefined ? { name: payload.name } : {}),
     ...(payload.timezone !== undefined ? { timezone } : {}),

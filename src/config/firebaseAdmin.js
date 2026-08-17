@@ -202,6 +202,12 @@ const restAuth = {
     };
   },
 
+  async createCustomToken() {
+    // Custom tokens are signed with the service-account private key, which the REST
+    // fallback does not have. Email-code sign-in therefore needs Admin credentials.
+    throw adminCredentialRequiredError("Email sign-in codes");
+  },
+
   async deleteUser() {
     throw adminCredentialRequiredError("Deleting Firebase accounts");
   },

@@ -1,4 +1,6 @@
 const prisma = require("../db/prisma");
+const { PERMISSIONS } = require("../utils/permissions");
+const { findUsersWithPermission } = require("./role.service");
 const ApiError = require("../utils/apiError");
 const { firebaseMessaging } = require("../config/firebaseAdmin");
 const { env } = require("../config/env");
@@ -267,15 +269,10 @@ const createForRecipients = async ({ actor, notification, recipientIds }) => {
   if (event) await safelyDeliverOutboxEvent(event.id);
 };
 
+// Resolved by permission rather than by a fixed role list, so custom roles that hold
+// user administration are notified alongside the built-in admins.
 const getAdministratorIds = async (organizationId) => {
-  const administrators = await prisma.user.findMany({
-    select: { id: true },
-    where: {
-      organizationId,
-      role: { in: ["SUPER_ADMIN", "ADMIN"] },
-      status: "ACTIVE",
-    },
-  });
+  const administrators = await findUsersWithPermission(organizationId, PERMISSIONS.USERS_MANAGE);
 
   return administrators.map(({ id }) => id);
 };

@@ -74,6 +74,15 @@ const taskStatusValues = [
 ];
 
 const projectPriorityValues = ["low", "normal", "high", "critical", "LOW", "NORMAL", "HIGH", "CRITICAL"];
+// Roles are workspace data now, so the shape is validated here and existence is
+// checked against the organization's roles table by the service layer.
+const roleKeySchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(40)
+  .transform((value) => value.toLowerCase())
+  .refine((value) => /^[a-z][a-z0-9_]*$/.test(value), "Role keys use lowercase letters, numbers, and underscores.");
 const permissionKeySchema = z.string().trim().min(1).max(80);
 const projectTagsSchema = z.array(z.string().trim().min(1).max(40)).max(12);
 const skillsSchema = z.array(z.string().trim().min(1).max(80)).max(30);
@@ -107,8 +116,7 @@ const requirementInputSchema = z.object({
   title: z.string().trim().min(1, "Requirement title is required.").max(160),
 });
 const workspaceDepartmentsSchema = z.array(z.string().trim().min(1).max(80)).max(40);
-const moduleRoleSchema = z.enum(roleValues);
-const moduleRolesSchema = z.array(moduleRoleSchema).max(6);
+const moduleRolesSchema = z.array(roleKeySchema).max(30);
 const customFieldTypeSchema = z.enum([
   "text",
   "long_text",
@@ -193,7 +201,7 @@ const createOrganizationUserSchema = z.object({
   email: z.string().trim().email("Enter a valid email address.").max(255),
   fullName: z.string().trim().min(1, "Full name is required.").max(120),
   password: z.string().min(12, "Temporary passwords must be at least 12 characters.").max(128).optional(),
-  role: z.enum(roleValues).default("employee"),
+  role: roleKeySchema.default("employee"),
   skills: skillsSchema.default([]),
   weeklyCapacityHours: z.coerce.number().positive().max(168).default(40),
 });
@@ -207,7 +215,7 @@ const updateOrganizationUserSchema = z.object({
   email: z.string().trim().email("Enter a valid email address.").max(255).optional(),
   fullName: optionalTrimmedString(120),
   password: z.string().min(12, "Passwords must be at least 12 characters.").max(128).optional(),
-  role: z.enum(roleValues).optional(),
+  role: roleKeySchema.optional(),
   skills: skillsSchema.optional(),
   status: z.enum(["active", "suspended", "ACTIVE", "SUSPENDED"]).optional(),
   weeklyCapacityHours: z.coerce.number().positive().max(168).optional(),
@@ -344,7 +352,7 @@ const updateTaskStatusSchema = z.object({
 });
 
 const updateUserRoleSchema = z.object({
-  role: z.enum(roleValues),
+  role: roleKeySchema,
 });
 
 const updateCurrentProfileSchema = z.object({
@@ -418,14 +426,46 @@ const reviewAttendanceCorrectionSchema = z.object({
   status: z.enum(["approved", "rejected", "APPROVED", "REJECTED"]),
 });
 
+const createRoleSchema = z.object({
+  description: optionalTrimmedString(300),
+  key: optionalTrimmedString(40),
+  name: z.string().trim().min(2, "Role name must contain at least 2 characters.").max(60),
+  permissions: z.array(permissionKeySchema).max(50).default([]),
+});
+
+const updateRoleSchema = z.object({
+  description: optionalTrimmedString(300),
+  name: z.string().trim().min(2, "Role name must contain at least 2 characters.").max(60).optional(),
+  permissions: z.array(permissionKeySchema).max(50).optional(),
+});
+
+const requestSignInCodeSchema = z.object({
+  email: z.string().trim().toLowerCase().email("Enter a valid email address.").max(160),
+});
+
+const verifySignInCodeSchema = z.object({
+  code: z
+    .string()
+    .trim()
+    .regex(/^\d{6}$/, "Enter the 6-digit code from your email."),
+  email: z.string().trim().toLowerCase().email("Enter a valid email address.").max(160),
+});
+
 const updateUserPermissionsSchema = z.object({
   permissions: z.array(permissionKeySchema).max(50).default([]),
   useRoleDefaults: z.boolean().default(false),
 });
 
+const timeOfDaySchema = (label) =>
+  z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, `Use HH:mm for ${label}.`);
+
 const updateWorkspaceSettingsSchema = z
   .object({
+    checkInGraceMinutes: z.coerce.number().int().min(0).max(720).optional(),
+    checkoutWindowEnd: timeOfDaySchema("the checkout window end").optional(),
+    checkoutWindowStart: timeOfDaySchema("the checkout window start").optional(),
     departments: workspaceDepartmentsSchema.optional(),
+    minimumOfficeMinutes: z.coerce.number().int().min(0).max(1440).optional(),
     holidays: z
       .array(z.string().refine(isDateOnly, "Holiday dates must be valid and use YYYY-MM-DD."))
       .max(200)
@@ -443,6 +483,17 @@ const updateWorkspaceSettingsSchema = z
         code: "custom",
         message: "Workday end must be later than workday start.",
         path: ["workdayEnd"],
+      });
+    }
+    if (
+      settings.checkoutWindowStart &&
+      settings.checkoutWindowEnd &&
+      settings.checkoutWindowStart >= settings.checkoutWindowEnd
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "The checkout window must end later than it starts.",
+        path: ["checkoutWindowEnd"],
       });
     }
     if (settings.workingDays && new Set(settings.workingDays).size !== settings.workingDays.length) {
@@ -530,7 +581,11 @@ module.exports = {
   customRecordSchema,
   generateProjectPlanSchema,
   parseBody,
+  createRoleSchema,
+  requestSignInCodeSchema,
   reviewAttendanceCorrectionSchema,
+  updateRoleSchema,
+  verifySignInCodeSchema,
   reviewProjectPlanSchema,
   setTaskWatchingSchema,
   syncProfileSchema,
