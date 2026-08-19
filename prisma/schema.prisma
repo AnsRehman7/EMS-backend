@@ -128,6 +128,19 @@ enum OutboxStatus {
   FAILED
 }
 
+enum MeetingStatus {
+  SCHEDULED
+  CANCELLED
+  COMPLETED
+}
+
+enum AttendeeResponse {
+  INVITED
+  ACCEPTED
+  DECLINED
+  TENTATIVE
+}
+
 enum CorrectionStatus {
   PENDING
   APPROVED
@@ -188,6 +201,8 @@ model User {
   attendanceChallenges     AttendanceChallenge[]
   attendanceCorrections    AttendanceCorrection[] @relation("CorrectionRequester")
   reviewedCorrections      AttendanceCorrection[] @relation("CorrectionReviewer")
+  organizedMeetings        Meeting[]              @relation("MeetingOrganizer")
+  meetingInvitations       MeetingAttendee[]
 
   @@index([organizationId, role])
   @@index([organizationId, status])
@@ -234,6 +249,7 @@ model Organization {
   attendanceChallenges  AttendanceChallenge[]
   attendanceCorrections AttendanceCorrection[]
   roles                 Role[]
+  meetings              Meeting[]
 
   @@index([status])
   @@index([plan])
@@ -271,6 +287,7 @@ model Project {
   tasks        Task[]
   requirements ProjectRequirement[]
   plans        ProjectPlan[]
+  meetings     Meeting[]
 
   @@unique([organizationId, code])
   @@index([organizationId, status])
@@ -321,6 +338,7 @@ model Task {
   dependents   TaskDependency[] @relation("TaskDependents")
   watchers     TaskWatcher[]
   attachments  TaskAttachment[]
+  meetings     Meeting[]
 
   @@index([organizationId, status])
   @@index([projectId, status])
@@ -422,6 +440,52 @@ model WorkspaceOffice {
 
   @@index([organizationId, isActive])
   @@map("workspace_offices")
+}
+
+/// A scheduled meeting. Optionally linked to the project or task it is about, so the
+/// calendar can show why the time is being spent.
+model Meeting {
+  id             String        @id @default(cuid())
+  organizationId String
+  title          String
+  agenda         String?
+  location       String?
+  meetingUrl     String?
+  startsAt       DateTime
+  endsAt         DateTime
+  status         MeetingStatus @default(SCHEDULED)
+  organizerId    String
+  projectId      String?
+  taskId         String?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  organization Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  organizer    User              @relation("MeetingOrganizer", fields: [organizerId], references: [id], onDelete: Cascade)
+  project      Project?          @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  task         Task?             @relation(fields: [taskId], references: [id], onDelete: SetNull)
+  attendees    MeetingAttendee[]
+
+  @@index([organizationId, startsAt])
+  @@index([organizerId, startsAt])
+  @@index([projectId])
+  @@map("meetings")
+}
+
+model MeetingAttendee {
+  id          String           @id @default(cuid())
+  meetingId   String
+  userId      String
+  response    AttendeeResponse @default(INVITED)
+  respondedAt DateTime?
+  createdAt   DateTime         @default(now())
+
+  meeting Meeting @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([meetingId, userId])
+  @@index([userId])
+  @@map("meeting_attendees")
 }
 
 /// Workspace roles. The six system roles are seeded per organization and cannot be

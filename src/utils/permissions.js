@@ -5,6 +5,7 @@ const PERMISSIONS = Object.freeze({
   CUSTOMIZATION_MANAGE: "customization.manage",
   AUDIT_VIEW: "audit.view",
   DASHBOARD_VIEW: "dashboard.view",
+  MEETINGS_MANAGE: "meetings.manage",
   PERMISSIONS_MANAGE: "permissions.manage",
   PROJECTS_CREATE: "projects.create",
   PROJECTS_DELETE: "projects.delete",
@@ -94,6 +95,12 @@ const PERMISSION_CATALOG = Object.freeze([
     label: "Manage attendance",
   },
   {
+    description: "Reschedule or cancel meetings organized by anyone, not just your own.",
+    group: "People",
+    key: PERMISSIONS.MEETINGS_MANAGE,
+    label: "Manage all meetings",
+  },
+  {
     description: "View the workspace directory and account details.",
     group: "People",
     key: PERMISSIONS.USERS_VIEW,
@@ -147,6 +154,7 @@ const ROLE_PERMISSIONS = Object.freeze({
       ![PERMISSIONS.BILLING_MANAGE, PERMISSIONS.CUSTOMIZATION_MANAGE].includes(permission),
   ),
   MANAGER: [
+    PERMISSIONS.MEETINGS_MANAGE,
     PERMISSIONS.DASHBOARD_VIEW,
     PERMISSIONS.REPORTS_VIEW,
     PERMISSIONS.TASKS_VIEW_ALL,
@@ -159,6 +167,7 @@ const ROLE_PERMISSIONS = Object.freeze({
     PERMISSIONS.PROJECTS_DELETE,
   ],
   HR: [
+    PERMISSIONS.MEETINGS_MANAGE,
     PERMISSIONS.DASHBOARD_VIEW,
     PERMISSIONS.REPORTS_VIEW,
     PERMISSIONS.TASKS_VIEW_ALL,

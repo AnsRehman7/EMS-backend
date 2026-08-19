@@ -750,7 +750,11 @@ const reviewCorrection = async (currentUser, correctionId, payload) => {
 };
 
 module.exports = {
+  attendanceRules,
   createCorrection,
+  currentDateKey,
+  eachDateKey,
+  getDateRange,
   createScan,
   getAttendanceSummary,
   issueChallenge,

@@ -426,6 +426,24 @@ const reviewAttendanceCorrectionSchema = z.object({
   status: z.enum(["approved", "rejected", "APPROVED", "REJECTED"]),
 });
 
+const createMeetingSchema = z.object({
+  agenda: optionalTrimmedString(4000),
+  attendeeIds: z.array(z.string().trim().min(1).max(80)).max(50).default([]),
+  endsAt: z.string().trim().min(1, "Meeting end is required.").max(40),
+  location: optionalTrimmedString(200),
+  meetingUrl: z.union([z.literal(""), secureUrlSchema("Meeting link must be a valid HTTPS URL.")]).optional(),
+  projectId: optionalTrimmedString(80),
+  startsAt: z.string().trim().min(1, "Meeting start is required.").max(40),
+  taskId: optionalTrimmedString(80),
+  title: z.string().trim().min(2, "Meeting title must contain at least 2 characters.").max(160),
+});
+
+const updateMeetingSchema = createMeetingSchema.partial();
+
+const respondToMeetingSchema = z.object({
+  response: z.enum(["accepted", "declined", "tentative", "ACCEPTED", "DECLINED", "TENTATIVE"]),
+});
+
 const createRoleSchema = z.object({
   description: optionalTrimmedString(300),
   key: optionalTrimmedString(40),
@@ -581,9 +599,12 @@ module.exports = {
   customRecordSchema,
   generateProjectPlanSchema,
   parseBody,
+  createMeetingSchema,
   createRoleSchema,
   requestSignInCodeSchema,
+  respondToMeetingSchema,
   reviewAttendanceCorrectionSchema,
+  updateMeetingSchema,
   updateRoleSchema,
   verifySignInCodeSchema,
   reviewProjectPlanSchema,
