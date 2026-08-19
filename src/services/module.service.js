@@ -364,7 +364,7 @@ const getModuleByKey = async (currentUser, moduleKey) => {
 const createModule = async (currentUser, payload) => {
   assertCustomizationAdmin(currentUser);
   if (SYSTEM_MODULES.some((module) => module.key === payload.key)) {
-    throw new ApiError(400, "That module key is reserved by StaffFlow.");
+    throw new ApiError(400, "That module key is reserved by DayMark.");
   }
 
   const fields = payload.fields.map(normalizeFieldInput);
@@ -429,7 +429,7 @@ const getModuleForCustomization = async (currentUser, moduleId) => {
 const updateModule = async (currentUser, moduleId, payload) => {
   const existing = await getModuleForCustomization(currentUser, moduleId);
   if (existing.kind === "SYSTEM" && String(payload.status || "").toUpperCase() === "ARCHIVED") {
-    throw new ApiError(400, "Core StaffFlow modules cannot be archived.");
+    throw new ApiError(400, "Core DayMark modules cannot be archived.");
   }
   if (payload.primaryFieldId) {
     const primaryField = existing.fields.find(

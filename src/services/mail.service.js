@@ -52,11 +52,11 @@ const escapeHtml = (value = "") =>
 
 const sendSignInCodeEmail = async ({ code, expiresMinutes, name, to }) => {
   const greeting = name ? `Hi ${escapeHtml(name.split(" ")[0])},` : "Hi,";
-  const subject = `${code} is your StaffFlow sign-in code`;
+  const subject = `${code} is your DayMark sign-in code`;
   const text = [
     `${name ? `Hi ${name.split(" ")[0]},` : "Hi,"}`,
     "",
-    `Your StaffFlow sign-in code is ${code}.`,
+    `Your DayMark sign-in code is ${code}.`,
     `It expires in ${expiresMinutes} minutes and can be used once.`,
     "",
     "If you did not try to sign in, you can ignore this email and your account stays secure.",
@@ -67,7 +67,7 @@ const sendSignInCodeEmail = async ({ code, expiresMinutes, name, to }) => {
       <div style="max-width:520px;margin:0 auto;background:#ffffff;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden;">
         <div style="padding:24px 28px;border-bottom:1px solid #e2e8f0;">
           <span style="display:inline-block;background:#047857;color:#ffffff;font-weight:700;font-size:13px;padding:8px 10px;border-radius:8px;">SF</span>
-          <span style="margin-left:10px;font-weight:700;color:#020617;font-size:15px;vertical-align:middle;">StaffFlow</span>
+          <span style="margin-left:10px;font-weight:700;color:#020617;font-size:15px;vertical-align:middle;">DayMark</span>
         </div>
         <div style="padding:28px;">
           <p style="margin:0 0 18px;color:#334155;font-size:15px;line-height:24px;">${greeting}</p>

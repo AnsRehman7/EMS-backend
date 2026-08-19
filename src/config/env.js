@@ -57,7 +57,7 @@ const env = {
   groqModel: process.env.GROQ_MODEL || "llama-3.3-70b-versatile",
   // Both naming conventions are accepted so an existing .env keeps working.
   mailFromAddress: process.env.MAIL_FROM_ADDRESS || process.env.SMTP_FROM || process.env.SMTP_USER,
-  mailFromName: process.env.MAIL_FROM_NAME || "StaffFlow",
+  mailFromName: process.env.MAIL_FROM_NAME || "DayMark",
   nodeEnv: process.env.NODE_ENV || "development",
   otpCooldownSeconds: toNumber(process.env.OTP_COOLDOWN_SECONDS, 60),
   otpMaxAttempts: toNumber(process.env.OTP_MAX_ATTEMPTS, 5),

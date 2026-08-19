@@ -57,7 +57,7 @@ app.use("/api", rateLimit({ limit: env.rateLimitMax }));
 app.use("/api/auth", rateLimit({ keyPrefix: "auth", limit: env.authRateLimitMax, windowMs: 60_000 }));
 
 app.get("/", (_req, res) => {
-  res.status(200).json({ data: { service: "StaffFlow API", status: "ok" } });
+  res.status(200).json({ data: { service: "DayMark API", status: "ok" } });
 });
 
 app.get("/favicon.ico", (_req, res) => res.status(204).end());
@@ -66,7 +66,7 @@ app.get("/health", (_req, res) => {
   res.status(200).json({
     data: {
       authentication: firebaseAuthReady ? firebaseAuthMode : "unconfigured",
-      service: "StaffFlow API",
+      service: "DayMark API",
       status: "ok",
     },
   });

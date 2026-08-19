@@ -19,7 +19,7 @@ test("public operational endpoints are healthy", async (context) => {
 
   const rootResponse = await fetch(`${baseUrl}/`);
   assert.equal(rootResponse.status, 200);
-  assert.equal((await rootResponse.json()).data.service, "StaffFlow API");
+  assert.equal((await rootResponse.json()).data.service, "DayMark API");
 
   const healthResponse = await fetch(`${baseUrl}/health`);
   const health = await healthResponse.json();

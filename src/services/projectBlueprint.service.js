@@ -149,7 +149,7 @@ Rules:
 - requiredSkills contains concise professional skill tags used for explainable assignee recommendations.
 - confidence is 0-100 and expresses confidence that scope and effort are adequate.
 - riskLevel is low, medium, high, or critical. priority is low, normal, or high.
-- Do not choose or name employees. StaffFlow calculates recommendations from capacity and skills.
+- Do not choose or name employees. DayMark calculates recommendations from capacity and skills.
 - Use no more than ${MAX_TASKS} tasks. projectWeight values should sum to 100.
 - List assumptions explicitly. List unclear or absent information in missingRequirements.
 
@@ -198,7 +198,7 @@ const generateProjectPlanBlueprint = async ({ organization, project, requirement
   if (!isGroqConfigured()) {
     return {
       blueprint: fallbackBlueprint(requirements),
-      degradedReason: "Groq is not configured; StaffFlow used its deterministic planner.",
+      degradedReason: "Groq is not configured; DayMark used its deterministic planner.",
       model: "staffflow-deterministic-v1",
     };
   }
@@ -209,7 +209,7 @@ const generateProjectPlanBlueprint = async ({ organization, project, requirement
   } catch (error) {
     return {
       blueprint: fallbackBlueprint(requirements),
-      degradedReason: `AI planning was unavailable (${error.message}); StaffFlow used its deterministic planner.`,
+      degradedReason: `AI planning was unavailable (${error.message}); DayMark used its deterministic planner.`,
       model: "staffflow-deterministic-v1",
     };
   }

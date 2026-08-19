@@ -8,7 +8,7 @@ const { env } = require("../config/env");
 const serializeNotification = (notification) => ({
   actionUrl: notification.actionUrl || "",
   actorId: notification.actorId || "",
-  actorName: notification.actor?.fullName || "StaffFlow",
+  actorName: notification.actor?.fullName || "DayMark",
   createdAt: notification.createdAt,
   entityId: notification.entityId || "",
   entityType: notification.entityType || "",
@@ -97,7 +97,7 @@ const dispatchPush = async (recipientIds, notification, organizationId = undefin
       entityType: String(notification.entityType || ""),
       eventId: String(notification.eventId || ""),
       message: String(notification.message || ""),
-      title: String(notification.title || "StaffFlow"),
+      title: String(notification.title || "DayMark"),
       type: String(notification.type || "GENERAL"),
     },
     notification: { body: notification.message, title: notification.title },
