@@ -40,4 +40,7 @@ router.patch(
 );
 router.delete("/:userId", requirePermission(PERMISSIONS.USERS_MANAGE), userController.deleteUser);
 
+// Irreversible. The service additionally requires the account to already be suspended.
+router.delete("/:userId/purge", requirePermission(PERMISSIONS.USERS_MANAGE), userController.purgeUser);
+
 module.exports = router;

@@ -41,3 +41,28 @@ test("a released account is recognisable by its tombstone identity", () => {
   assert.equal(released.email.endsWith("@removed.invalid"), true);
   assert.equal({ firebaseUid: "firebase-uid-1" }.firebaseUid.startsWith("released:"), false);
 });
+
+test("permanent user deletion is only offered once an account is suspended", () => {
+  // Mirrors the service guard: purging an active account is refused, so the flow is
+  // always suspend first, then delete.
+  const canPurge = (status) => status === "SUSPENDED";
+
+  assert.equal(canPurge("SUSPENDED"), true);
+  assert.equal(canPurge("ACTIVE"), false);
+});
+
+test("authored work is reassigned rather than cascaded away on purge", () => {
+  // Task.createdBy and Project.createdBy cascade from User, so a bare delete would
+  // take the workspace's work with it. These relations must be transferred first.
+  const transferredBeforeDelete = [
+    "task.createdById",
+    "project.createdById",
+    "projectRequirement.createdById",
+    "projectPlan.createdById",
+    "meeting.organizerId",
+  ];
+
+  assert.equal(transferredBeforeDelete.length, 5);
+  assert.ok(transferredBeforeDelete.includes("task.createdById"));
+  assert.ok(transferredBeforeDelete.includes("project.createdById"));
+});

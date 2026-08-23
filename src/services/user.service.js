@@ -834,8 +834,77 @@ const deleteOrganizationUser = async (currentUser, userId) => {
   return serializeUserWithCustomData(currentUser, updatedUser);
 };
 
+/**
+ * Permanently removes a suspended member and everything personal to them.
+ *
+ * Authored work is transferred to the acting administrator first. `Task.createdBy` and
+ * `Project.createdBy` cascade from User, so deleting the row directly would take every
+ * task and project that person ever created with it; requirements and plans are
+ * `Restrict` and would block the delete outright. Reassigning keeps the workspace's
+ * work intact while the person's own records (attendance, time logs, notifications,
+ * comments) cascade away as intended.
+ */
+const purgeOrganizationUser = async (currentUser, userId) => {
+  const existingUser = await getManagedUser(currentUser, userId);
+
+  if (existingUser.status !== "SUSPENDED") {
+    throw new ApiError(409, "Suspend this account before deleting it permanently.");
+  }
+  if (currentUser.id === existingUser.id) {
+    throw new ApiError(400, "You cannot delete your own account.");
+  }
+  if (roleKeyOf(existingUser) === "super_admin" && roleKeyOf(currentUser) !== "super_admin") {
+    throw new ApiError(403, "Only a super admin can delete another super admin.");
+  }
+
+  assertCanManageUser(currentUser, existingUser.roleRef || roleKeyOf(existingUser));
+  await ensureActiveSuperAdminRemains(existingUser, roleKeyOf(existingUser), "SUSPENDED");
+
+  const { email: releasedEmail, firebaseUid, fullName } = existingUser;
+  const reassignTo = currentUser.id;
+
+  const transferred = await prisma.$transaction(async (transaction) => {
+    const [tasks, projects, requirements, plans, meetings] = await Promise.all([
+      transaction.task.updateMany({ data: { createdById: reassignTo }, where: { createdById: userId } }),
+      transaction.project.updateMany({ data: { createdById: reassignTo }, where: { createdById: userId } }),
+      transaction.projectRequirement.updateMany({ data: { createdById: reassignTo }, where: { createdById: userId } }),
+      transaction.projectPlan.updateMany({ data: { createdById: reassignTo }, where: { createdById: userId } }),
+      transaction.meeting.updateMany({ data: { organizerId: reassignTo }, where: { organizerId: userId } }),
+    ]);
+
+    await transaction.user.delete({ where: { id: userId } });
+
+    return {
+      meetings: meetings.count,
+      plans: plans.count,
+      projects: projects.count,
+      requirements: requirements.count,
+      tasks: tasks.count,
+    };
+  });
+
+  // A released account has no Firebase login left; anything else still does.
+  if (!firebaseUid.startsWith("released:")) {
+    await firebaseAuth.deleteUser(firebaseUid).catch((error) => {
+      console.warn("Unable to delete the Firebase login during purge:", error.message);
+    });
+  }
+
+  await safelyRecordAudit({
+    action: "DELETED",
+    actor: currentUser,
+    entityId: userId,
+    entityType: "USER",
+    metadata: { releasedEmail, transferred },
+    summary: `Permanently deleted ${fullName} and reassigned their authored work`,
+  });
+
+  return { name: fullName, transferred };
+};
+
 module.exports = {
   createOrganizationUser,
+  purgeOrganizationUser,
   deleteOrganizationUser,
   getCurrentUser,
   getWorkspacePermissionCatalog,

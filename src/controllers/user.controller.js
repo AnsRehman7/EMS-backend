@@ -60,7 +60,13 @@ const deleteUser = asyncHandler(async (req, res) => {
   res.status(200).json({ data: { user } });
 });
 
+const purgeUser = asyncHandler(async (req, res) => {
+  const result = await userService.purgeOrganizationUser(req.user, req.params.userId);
+  res.status(200).json({ data: result });
+});
+
 module.exports = {
+  purgeUser,
   createUser,
   deleteUser,
   getUserById,
