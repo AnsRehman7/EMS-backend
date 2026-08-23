@@ -1,6 +1,12 @@
 const workspaceService = require("../services/workspace.service");
 const asyncHandler = require("../utils/asyncHandler");
-const { createOfficeSchema, parseBody, updateOfficeSchema, updateWorkspaceSettingsSchema } = require("../utils/validators");
+const {
+  createOfficeSchema,
+  deleteWorkspaceSchema,
+  parseBody,
+  updateOfficeSchema,
+  updateWorkspaceSettingsSchema,
+} = require("../utils/validators");
 
 const getSettings = asyncHandler(async (req, res) => {
   const settings = await workspaceService.getWorkspaceSettings(req.user);
@@ -32,4 +38,10 @@ const deleteOffice = asyncHandler(async (req, res) => {
   res.status(204).send();
 });
 
-module.exports = { createOffice, deleteOffice, getSettings, updateOffice, updateSettings };
+const deleteWorkspace = asyncHandler(async (req, res) => {
+  const payload = parseBody(deleteWorkspaceSchema, req.body);
+  const result = await workspaceService.deleteWorkspace(req.user, payload.confirmation);
+  res.status(200).json({ data: result });
+});
+
+module.exports = { createOffice, deleteOffice, deleteWorkspace, getSettings, updateOffice, updateSettings };

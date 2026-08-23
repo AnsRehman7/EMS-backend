@@ -590,14 +590,44 @@ const updateOrganizationUser = async (currentUser, userId, payload) => {
       ...(payload.weeklyCapacityHours !== undefined ? { weeklyCapacityHours: payload.weeklyCapacityHours } : {}),
     },
   });
+  // Suspension released this account's login, so reactivating means issuing a new one.
+  const wasReleased = existingUser.firebaseUid.startsWith("released:");
+  const isReactivating = wasReleased && nextStatus === "ACTIVE";
+  let reissuedFirebaseUid = null;
+
+  if (isReactivating) {
+    if (!payload.email) {
+      throw new ApiError(
+        400,
+        "This account's email was released when it was suspended. Provide an email address to reactivate it.",
+      );
+    }
+
+    try {
+      const recreated = await firebaseAuth.createUser({
+        disabled: false,
+        displayName: payload.fullName || existingUser.fullName,
+        email: nextEmail,
+        emailVerified: false,
+        password: payload.password || randomBytes(32).toString("base64url"),
+      });
+      reissuedFirebaseUid = recreated.uid;
+    } catch (error) {
+      if (error instanceof ApiError) throw error;
+      throw new ApiError(400, mapFirebaseAdminError(error), error.code);
+    }
+  }
+
   const firebaseUpdates = {};
 
-  if (nextEmail !== existingUser.email) firebaseUpdates.email = nextEmail;
-  if (payload.fullName && payload.fullName !== existingUser.fullName) firebaseUpdates.displayName = payload.fullName;
-  if (payload.password) firebaseUpdates.password = payload.password;
-  if (nextStatus !== existingUser.status) firebaseUpdates.disabled = nextStatus === "SUSPENDED";
+  if (!isReactivating) {
+    if (nextEmail !== existingUser.email) firebaseUpdates.email = nextEmail;
+    if (payload.fullName && payload.fullName !== existingUser.fullName) firebaseUpdates.displayName = payload.fullName;
+    if (payload.password) firebaseUpdates.password = payload.password;
+    if (nextStatus !== existingUser.status) firebaseUpdates.disabled = nextStatus === "SUSPENDED";
+  }
 
-  if (Object.keys(firebaseUpdates).length) {
+  if (Object.keys(firebaseUpdates).length && !wasReleased) {
     try {
       await firebaseAuth.updateUser(existingUser.firebaseUid, firebaseUpdates);
     } catch (error) {
@@ -614,6 +644,7 @@ const updateOrganizationUser = async (currentUser, userId, payload) => {
       department: payload.department ?? existingUser.department,
       designation: payload.designation ?? existingUser.designation,
       email: nextEmail,
+      ...(reissuedFirebaseUid ? { firebaseUid: reissuedFirebaseUid } : {}),
       fullName: payload.fullName || existingUser.fullName,
       role: nextRole,
       roleId: nextRoleId,
@@ -767,12 +798,20 @@ const deleteOrganizationUser = async (currentUser, userId) => {
 
   await ensureActiveSuperAdminRemains(existingUser, roleKeyOf(existingUser), "SUSPENDED");
 
-  await firebaseAuth.updateUser(existingUser.firebaseUid, { disabled: true }).catch((error) => {
-    console.warn("Unable to disable Firebase user:", error.message);
+  // Suspending releases the person's identity: the Firebase login is deleted and the
+  // email is replaced with a tombstone, so they are free to sign up their own
+  // workspace with that address. The row itself stays, because attendance, audit, and
+  // authored work must survive the person leaving.
+  await firebaseAuth.deleteUser(existingUser.firebaseUid).catch((error) => {
+    console.warn("Unable to delete the Firebase login while suspending:", error.message);
   });
 
   const updatedUser = await prisma.user.update({
-    data: { status: "SUSPENDED" },
+    data: {
+      email: `released+${existingUser.id}@removed.invalid`,
+      firebaseUid: `released:${existingUser.id}`,
+      status: "SUSPENDED",
+    },
     include: {
       organization: true,
       roleRef: true,
@@ -785,8 +824,11 @@ const deleteOrganizationUser = async (currentUser, userId) => {
     actor: currentUser,
     entityId: updatedUser.id,
     entityType: "USER",
-    metadata: { previousStatus: String(existingUser.status).toLowerCase() },
-    summary: `Suspended account for ${updatedUser.fullName}`,
+    metadata: {
+      previousStatus: String(existingUser.status).toLowerCase(),
+      releasedEmail: existingUser.email,
+    },
+    summary: `Suspended ${updatedUser.fullName} and released ${existingUser.email}`,
   });
 
   return serializeUserWithCustomData(currentUser, updatedUser);

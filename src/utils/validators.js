@@ -426,6 +426,10 @@ const reviewAttendanceCorrectionSchema = z.object({
   status: z.enum(["approved", "rejected", "APPROVED", "REJECTED"]),
 });
 
+const deleteWorkspaceSchema = z.object({
+  confirmation: z.string().trim().min(1, "Type the workspace name to confirm.").max(160),
+});
+
 const createMeetingSchema = z.object({
   agenda: optionalTrimmedString(4000),
   attendeeIds: z.array(z.string().trim().min(1).max(80)).max(50).default([]),
@@ -601,6 +605,7 @@ module.exports = {
   parseBody,
   createMeetingSchema,
   createRoleSchema,
+  deleteWorkspaceSchema,
   requestSignInCodeSchema,
   respondToMeetingSchema,
   reviewAttendanceCorrectionSchema,

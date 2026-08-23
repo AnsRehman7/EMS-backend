@@ -1,5 +1,7 @@
 const prisma = require("../db/prisma");
 const ApiError = require("../utils/apiError");
+const { firebaseAuth } = require("../config/firebaseAdmin");
+const { roleKeyOf } = require("../utils/roles");
 const { safelyRecordAudit } = require("./audit.service");
 
 const normalizeDepartments = (departments = []) =>
@@ -198,9 +200,93 @@ const updateWorkspaceSettings = async (currentUser, payload) => {
   return getWorkspaceSettings(currentUser);
 };
 
+/**
+ * Permanently deletes a workspace and everything in it.
+ *
+ * Only User, Project, Task, and AttendanceScan hold `onDelete: Restrict` against the
+ * organization, so those and their dependants are removed explicitly, deepest first.
+ * Everything else cascades from the organization row. The whole thing runs in one
+ * transaction: a partial delete would leave a workspace nobody can sign in to but
+ * whose data still exists.
+ */
+const deleteWorkspace = async (currentUser, confirmation) => {
+  if (roleKeyOf(currentUser) !== "super_admin") {
+    throw new ApiError(403, "Only the workspace super admin can delete the workspace.");
+  }
+
+  const organization = await prisma.organization.findUnique({
+    where: { id: currentUser.organizationId },
+  });
+  if (!organization) throw new ApiError(404, "Workspace not found.");
+
+  // Typing the name is the last line of defence against an accidental click.
+  if (String(confirmation || "").trim() !== organization.name) {
+    throw new ApiError(400, "Type the workspace name exactly to confirm deletion.");
+  }
+
+  const members = await prisma.user.findMany({
+    select: { email: true, firebaseUid: true },
+    where: { organizationId: organization.id },
+  });
+
+  const organizationId = organization.id;
+  const scope = { where: { organizationId } };
+
+  await prisma.$transaction(async (transaction) => {
+    // Children of the restricted models, deepest first.
+    await transaction.customEntityData.deleteMany(scope);
+    await transaction.customModuleRecord.deleteMany(scope);
+    await transaction.customFieldDefinition.deleteMany(scope);
+    await transaction.moduleDefinition.deleteMany(scope);
+
+    await transaction.meetingAttendee.deleteMany(scope);
+    await transaction.meeting.deleteMany(scope);
+
+    await transaction.attendanceCorrection.deleteMany(scope);
+    await transaction.attendanceChallenge.deleteMany(scope);
+    await transaction.attendanceScan.deleteMany(scope);
+
+    // Plans reference tasks, so they go before tasks do.
+    await transaction.projectPlan.deleteMany(scope);
+    await transaction.projectRequirement.deleteMany(scope);
+
+    await transaction.taskAttachment.deleteMany(scope);
+    await transaction.taskWatcher.deleteMany(scope);
+    await transaction.timeLog.deleteMany(scope);
+    await transaction.task.deleteMany(scope);
+    await transaction.project.deleteMany(scope);
+
+    await transaction.notification.deleteMany(scope);
+    await transaction.pushSubscription.deleteMany(scope);
+    await transaction.outboxEvent.deleteMany(scope);
+    await transaction.auditLog.deleteMany(scope);
+
+    await transaction.user.deleteMany(scope);
+    await transaction.role.deleteMany(scope);
+    await transaction.workspaceOffice.deleteMany(scope);
+
+    await transaction.organization.delete({ where: { id: organizationId } });
+  });
+
+  // Firebase is cleaned up only after the database commits. Doing it first would strip
+  // logins from a workspace that still exists if the transaction then failed.
+  await Promise.all(
+    members
+      .filter((member) => !member.firebaseUid.startsWith("released:"))
+      .map((member) =>
+        firebaseAuth.deleteUser(member.firebaseUid).catch((error) => {
+          console.warn(`Unable to delete the Firebase login for ${member.email}:`, error.message);
+        }),
+      ),
+  );
+
+  return { deletedMembers: members.length, name: organization.name };
+};
+
 module.exports = {
   createOffice,
   deleteOffice,
+  deleteWorkspace,
   getWorkspaceSettings,
   updateOffice,
   updateWorkspaceSettings,

@@ -12,4 +12,7 @@ router.post("/offices", requirePermission(PERMISSIONS.SETTINGS_MANAGE), workspac
 router.patch("/offices/:officeId", requirePermission(PERMISSIONS.SETTINGS_MANAGE), workspaceController.updateOffice);
 router.delete("/offices/:officeId", requirePermission(PERMISSIONS.SETTINGS_MANAGE), workspaceController.deleteOffice);
 
+// Irreversible: the service additionally requires super admin and a typed confirmation.
+router.post("/delete", requirePermission(PERMISSIONS.SETTINGS_MANAGE), workspaceController.deleteWorkspace);
+
 module.exports = router;
