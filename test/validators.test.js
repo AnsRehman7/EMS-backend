@@ -60,14 +60,19 @@ test("structured requirements can replace a long free-form planning brief", () =
   assert.equal(result.success, true);
 });
 
-test("workspace schedule rejects an inverted workday", () => {
-  const result = updateWorkspaceSettingsSchema.safeParse({
-    workdayEnd: "09:00",
-    workdayStart: "18:00",
-  });
+test("workspace schedule treats an inverted workday as an overnight shift", () => {
+  // 18:00 to 09:00 is a night shift, not an error. Only a zero-length day is invalid.
+  assert.equal(
+    updateWorkspaceSettingsSchema.safeParse({ workdayEnd: "09:00", workdayStart: "18:00" }).success,
+    true,
+  );
 
-  assert.equal(result.success, false);
-  assert.ok(result.error.flatten().fieldErrors.workdayEnd?.length);
+  const sameTime = updateWorkspaceSettingsSchema.safeParse({
+    workdayEnd: "09:00",
+    workdayStart: "09:00",
+  });
+  assert.equal(sameTime.success, false);
+  assert.ok(sameTime.error.flatten().fieldErrors.workdayEnd?.length);
 });
 
 test("sign-in code requests normalize the email and reject malformed addresses", () => {
@@ -85,17 +90,26 @@ test("sign-in code verification requires exactly six digits", () => {
   }
 });
 
-test("attendance rules reject an inverted checkout window and out-of-range grace", () => {
-  const result = updateWorkspaceSettingsSchema.safeParse({
-    checkInGraceMinutes: 900,
-    checkoutWindowEnd: "16:00",
-    checkoutWindowStart: "18:00",
-  });
+test("attendance rules allow a wrapped checkout window but bound the grace period", () => {
+  // A checkout window may wrap past midnight for night shifts.
+  assert.equal(
+    updateWorkspaceSettingsSchema.safeParse({
+      checkoutWindowEnd: "02:00",
+      checkoutWindowStart: "22:00",
+    }).success,
+    true,
+  );
 
-  assert.equal(result.success, false);
-  const fields = result.error.flatten().fieldErrors;
-  assert.ok(fields.checkoutWindowEnd?.length);
-  assert.ok(fields.checkInGraceMinutes?.length);
+  const outOfRange = updateWorkspaceSettingsSchema.safeParse({ checkInGraceMinutes: 900 });
+  assert.equal(outOfRange.success, false);
+  assert.ok(outOfRange.error.flatten().fieldErrors.checkInGraceMinutes?.length);
+
+  const sameTime = updateWorkspaceSettingsSchema.safeParse({
+    checkoutWindowEnd: "16:00",
+    checkoutWindowStart: "16:00",
+  });
+  assert.equal(sameTime.success, false);
+  assert.ok(sameTime.error.flatten().fieldErrors.checkoutWindowEnd?.length);
 });
 
 test("attendance rules accept a valid policy and coerce numeric minutes", () => {

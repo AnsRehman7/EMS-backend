@@ -207,6 +207,55 @@ const minutesFromClock = (value = "00:00") => {
   return (Number.isFinite(hours) ? hours : 0) * 60 + (Number.isFinite(minutes) ? minutes : 0);
 };
 
+const MINUTES_PER_DAY = 24 * 60;
+
+/** A shift like 23:00 to 06:00 ends on the following calendar date. */
+const crossesMidnight = (start, end) => minutesFromClock(end) <= minutesFromClock(start);
+
+/**
+ * True when a time of day falls inside a window, including windows that wrap past
+ * midnight (22:00 to 02:00 contains both 23:30 and 01:00).
+ */
+const withinWindow = (minutes, start, end) => {
+  const from = minutesFromClock(start);
+  const to = minutesFromClock(end);
+  return from <= to ? minutes >= from && minutes <= to : minutes >= from || minutes <= to;
+};
+
+/**
+ * Minutes a check-in landed after the allowed start, measured around the clock so an
+ * overnight shift starting at 23:00 still reports a 00:30 arrival as 90 minutes late
+ * rather than as impossibly early.
+ */
+const minutesLate = (checkInMinutes, startClock, graceMinutes) => {
+  const threshold = (minutesFromClock(startClock) + graceMinutes) % MINUTES_PER_DAY;
+  const elapsed = (checkInMinutes - threshold + MINUTES_PER_DAY) % MINUTES_PER_DAY;
+  // More than half a day past the threshold reads as arriving early, not late.
+  return elapsed > MINUTES_PER_DAY / 2 ? 0 : elapsed;
+};
+
+/**
+ * The business day a scan belongs to. On an overnight shift the hours after midnight
+ * are still the previous day's shift, so those scans are attributed backwards rather
+ * than splitting one shift across two rows.
+ */
+const businessDateKey = (dateKey, minutes, rules) => {
+  if (!crossesMidnight(rules.officeStart, rules.officeEnd)) return dateKey;
+
+  // Cover the checkout window too, so a late exit is not orphaned onto the next day.
+  const shiftEnd = minutesFromClock(rules.officeEnd);
+  const checkoutEnd = minutesFromClock(rules.checkoutWindowEnd);
+  const cutoff = checkoutEnd <= minutesFromClock(rules.officeStart)
+    ? Math.max(shiftEnd, checkoutEnd)
+    : shiftEnd;
+
+  if (minutes > cutoff) return dateKey;
+
+  const previous = new Date(`${dateKey}T00:00:00.000Z`);
+  previous.setUTCDate(previous.getUTCDate() - 1);
+  return previous.toISOString().slice(0, 10);
+};
+
 const assertDateKey = (value, label) => {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(value || ""))) {
     throw new ApiError(400, `${label} must use YYYY-MM-DD format.`);
@@ -279,13 +328,10 @@ const buildDayRow = (member, dateKey, scans, rules) => {
   const isWorkingDay = rules.workingDays.includes(weekday);
   const ordered = [...scans].sort((first, second) => new Date(first.scannedAt) - new Date(second.scannedAt));
   const checkIn = ordered[0] || null;
-  const checkoutStart = minutesFromClock(rules.checkoutWindowStart);
-  const checkoutEnd = minutesFromClock(rules.checkoutWindowEnd);
   const checkoutCandidates = ordered.filter(
     (scan) =>
       String(scan.direction).toUpperCase() === "OUT" &&
-      scan.minutes >= checkoutStart &&
-      scan.minutes <= checkoutEnd,
+      withinWindow(scan.minutes, rules.checkoutWindowStart, rules.checkoutWindowEnd),
   );
   const checkOut = checkoutCandidates[checkoutCandidates.length - 1] || null;
 
@@ -308,8 +354,9 @@ const buildDayRow = (member, dateKey, scans, rules) => {
     checkIn && checkOut
       ? Math.max(0, Math.round((new Date(checkOut.scannedAt) - new Date(checkIn.scannedAt)) / 60_000))
       : 0;
-  const lateThreshold = minutesFromClock(rules.officeStart) + rules.checkInGraceMinutes;
-  const lateMinutes = checkIn ? Math.max(0, checkIn.minutes - lateThreshold) : 0;
+  const lateMinutes = checkIn
+    ? minutesLate(checkIn.minutes, rules.officeStart, rules.checkInGraceMinutes)
+    : 0;
 
   const status = !checkIn
     ? isHoliday
@@ -403,7 +450,8 @@ const getAttendanceSummary = async (
 
   const scansByUserDay = new Map();
   scans.forEach((scan) => {
-    const { dateKey, minutes } = zonedParts(scan.scannedAt, rules.timezone);
+    const { dateKey: calendarKey, minutes } = zonedParts(scan.scannedAt, rules.timezone);
+    const dateKey = businessDateKey(calendarKey, minutes, rules);
     const key = `${scan.userId}:${dateKey}`;
     if (!scansByUserDay.has(key)) scansByUserDay.set(key, []);
     scansByUserDay.get(key).push({ ...scan, minutes });
@@ -751,6 +799,10 @@ const reviewCorrection = async (currentUser, correctionId, payload) => {
 
 module.exports = {
   attendanceRules,
+  businessDateKey,
+  crossesMidnight,
+  minutesLate,
+  withinWindow,
   createCorrection,
   currentDateKey,
   eachDateKey,

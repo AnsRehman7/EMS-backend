@@ -163,12 +163,14 @@ const updateWorkspaceSettings = async (currentUser, payload) => {
   const checkoutWindowEnd = payload.checkoutWindowEnd || existing.checkoutWindowEnd;
   assertTimezone(timezone);
 
-  if (workdayStart >= workdayEnd) {
-    throw new ApiError(400, "Workday end must be later than workday start.");
+  // An end before the start is an overnight shift, which the attendance register
+  // handles by attributing after-midnight scans back to the shift that started.
+  if (workdayStart === workdayEnd) {
+    throw new ApiError(400, "Workday start and end cannot be the same time.");
   }
 
-  if (checkoutWindowStart >= checkoutWindowEnd) {
-    throw new ApiError(400, "The checkout window must end later than it starts.");
+  if (checkoutWindowStart === checkoutWindowEnd) {
+    throw new ApiError(400, "The checkout window cannot start and end at the same time.");
   }
 
   const data = {
