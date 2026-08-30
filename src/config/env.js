@@ -54,7 +54,9 @@ const env = {
     process.env.VITE_FIREBASE_API_KEY ||
     readFrontendEnvValue("VITE_FIREBASE_API_KEY"),
   groqApiKey: process.env.GROQ_API_KEY,
-  groqModel: process.env.GROQ_MODEL || "llama-3.3-70b-versatile",
+  // gpt-oss-120b is an open-weight (Apache-2.0) model served on Groq's free tier. The
+  // previous default, llama-3.3-70b-versatile, was retired and now returns a 404.
+  groqModel: process.env.GROQ_MODEL || "openai/gpt-oss-120b",
   // Both naming conventions are accepted so an existing .env keeps working.
   mailFromAddress: process.env.MAIL_FROM_ADDRESS || process.env.SMTP_FROM || process.env.SMTP_USER,
   mailFromName: process.env.MAIL_FROM_NAME || "DayMark",

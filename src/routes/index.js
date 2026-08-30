@@ -1,4 +1,5 @@
 const express = require("express");
+const assistantRoutes = require("./assistant.routes");
 const attendanceRoutes = require("./attendance.routes");
 const auditRoutes = require("./audit.routes");
 const authRoutes = require("./auth.routes");
@@ -15,6 +16,7 @@ const workspaceRoutes = require("./workspace.routes");
 
 const router = express.Router();
 
+router.use("/assistant", assistantRoutes);
 router.use("/attendance", attendanceRoutes);
 router.use("/audit", auditRoutes);
 router.use("/auth", authRoutes);

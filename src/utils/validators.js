@@ -586,10 +586,20 @@ const customRecordSchema = z.object({
   values: customValuesSchema.default({}),
 });
 
+const assistantMessageSchema = z.object({
+  message: z.string().trim().min(1, "Type what you want to do.").max(1000),
+});
+
+const assistantExecuteSchema = z.object({
+  planToken: z.string().trim().min(1, "That plan is no longer valid.").max(20000),
+});
+
 const parseBody = (schema, body) => schema.parse(body || {});
 
 module.exports = {
   approveProjectPlanSchema,
+  assistantExecuteSchema,
+  assistantMessageSchema,
   createAttendanceCorrectionSchema,
   createAttendanceScanSchema,
   createModuleSchema,
