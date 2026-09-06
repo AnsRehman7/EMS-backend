@@ -1,5 +1,6 @@
 const prisma = require("../db/prisma");
 const ApiError = require("../utils/apiError");
+const { refreshProjectWeights } = require("./analysis.service");
 const { hasPermission, PERMISSIONS } = require("../utils/permissions");
 const { generateProjectPlanBlueprint } = require("./projectBlueprint.service");
 const { safelyDeliverOutboxEvent } = require("./notification.service");
@@ -724,6 +725,17 @@ const approvePlan = async (currentUser, projectId, planId, options = {}) => {
     return outboxEvent.id;
   });
   await safelyDeliverOutboxEvent(outboxEventId);
+
+  // The draft plan carries weights proposed by the language model. Now that the tasks are
+  // real rows, re-weight them with the trained effort model so every task in the system -
+  // whether created by hand or from an approved plan - is weighted by the same measured
+  // predictor. Failure here must not undo an approval that already succeeded.
+  try {
+    await refreshProjectWeights(projectId, currentUser.organizationId);
+  } catch (error) {
+    console.warn(`[planning] Re-weighting project ${projectId} after approval failed:`, error.message);
+  }
+
   return serializePlan(await getPlanRecord(currentUser, projectId, planId));
 };
 

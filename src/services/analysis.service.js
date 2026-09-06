@@ -1,5 +1,6 @@
 const prisma = require("../db/prisma");
 const { generateJson, isGroqConfigured } = require("./groq.service");
+const { getModelInfo, predictProjectWeights } = require("./effortModel.service");
 
 const clamp = (value, min = 0, max = 100) => Math.min(max, Math.max(min, Number(value) || 0));
 const toNumber = (value) => (value === null || value === undefined ? 0 : Number(value));
@@ -214,9 +215,21 @@ const refreshProjectWeights = async (projectId, organizationId) => {
   if (!project || project.tasks.length === 0) return null;
 
   let weights = equalWeights(project.tasks);
-  let summary = "Equal weight fallback was used because Groq is not configured.";
+  let summary = "Equal weight fallback was used because no analysis was available.";
 
-  if (isGroqConfigured()) {
+  // The trained effort model is preferred over the language model: it is deterministic,
+  // costs nothing per call, needs no network, and its accuracy is measured rather than
+  // assumed. Groq remains as a fallback for when the model cannot score every task.
+  const modelWeights = predictProjectWeights(project.tasks);
+
+  if (modelWeights) {
+    weights = modelWeights;
+    const info = getModelInfo();
+    summary =
+      `Task weights were predicted by the in-house effort model ` +
+      `(${info.algorithm}, trained on ${info.trainingRows.toLocaleString()} issues ` +
+      `from ${info.projects} projects).`;
+  } else if (isGroqConfigured()) {
     try {
       const result = await generateJson(buildWeightPrompt(project, project.tasks));
       weights = normalizeWeights(project.tasks, result.tasks || []);
