@@ -1,6 +1,6 @@
 const { z } = require("zod");
 const ApiError = require("../utils/apiError");
-const { generateJson, isGroqConfigured } = require("./groq.service");
+const { generateJson, isLlmConfigured } = require("./llm.service");
 
 const MAX_TASKS = 24;
 const DAY_MS = 86_400_000;
@@ -177,7 +177,7 @@ ${JSON.stringify(
 };
 
 const generateProjectTaskPlan = async (project) => {
-  if (!isGroqConfigured()) {
+  if (!isLlmConfigured()) {
     throw new ApiError(503, "Groq is not configured. Add GROQ_API_KEY before using AI task planning.");
   }
 

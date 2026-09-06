@@ -1,6 +1,6 @@
 const prisma = require("../db/prisma");
 const ApiError = require("../utils/apiError");
-const { generateJson, isGroqConfigured } = require("./groq.service");
+const { generateJson, isLlmConfigured } = require("./llm.service");
 const { hasPermission } = require("../utils/permissions");
 const { projectCandidate, resolveEntity, userCandidate } = require("./assistantResolver.service");
 const { safelyRecordAudit } = require("./audit.service");
@@ -164,7 +164,7 @@ const describeAction = (action) => {
 /* -------------------------------------------------------------------------- */
 
 const interpret = async (currentUser, message) => {
-  if (!isGroqConfigured()) {
+  if (!isLlmConfigured()) {
     throw new ApiError(503, "The assistant is unavailable because no language model is configured.");
   }
 

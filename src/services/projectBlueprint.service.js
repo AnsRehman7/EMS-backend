@@ -1,6 +1,6 @@
 const { z } = require("zod");
 const { env } = require("../config/env");
-const { generateJson, isGroqConfigured } = require("./groq.service");
+const { generateJson, isLlmConfigured } = require("./llm.service");
 
 const MAX_TASKS = 32;
 
@@ -195,7 +195,7 @@ ${JSON.stringify(requirements)}
 const generateProjectPlanBlueprint = async ({ organization, project, requirements }) => {
   if (!requirements.length) throw new Error("At least one project requirement is required for planning.");
 
-  if (!isGroqConfigured()) {
+  if (!isLlmConfigured()) {
     return {
       blueprint: fallbackBlueprint(requirements),
       degradedReason: "Groq is not configured; DayMark used its deterministic planner.",

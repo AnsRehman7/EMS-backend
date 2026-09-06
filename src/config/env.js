@@ -53,6 +53,11 @@ const env = {
     process.env.FIREBASE_WEB_API_KEY ||
     process.env.VITE_FIREBASE_API_KEY ||
     readFrontendEnvValue("VITE_FIREBASE_API_KEY"),
+  geminiApiKey: process.env.GEMINI_API_KEY,
+  // gemini-2.5-flash and -pro return 404 for newer keys. The "-latest" aliases still
+  // resolve, and only the lite variant answers fast enough for a serverless request:
+  // gemini-flash-latest measured 33s against this key, which exceeds the function limit.
+  geminiModel: process.env.GEMINI_MODEL || "gemini-flash-lite-latest",
   groqApiKey: process.env.GROQ_API_KEY,
   // gpt-oss-120b is an open-weight (Apache-2.0) model served on Groq's free tier. The
   // previous default, llama-3.3-70b-versatile, was retired and now returns a 404.

@@ -1,5 +1,5 @@
 const prisma = require("../db/prisma");
-const { generateJson, isGroqConfigured } = require("./groq.service");
+const { generateJson, isLlmConfigured } = require("./llm.service");
 const { getModelInfo, predictProjectWeights } = require("./effortModel.service");
 
 const clamp = (value, min = 0, max = 100) => Math.min(max, Math.max(min, Number(value) || 0));
@@ -229,7 +229,7 @@ const refreshProjectWeights = async (projectId, organizationId) => {
       `Task weights were predicted by the in-house effort model ` +
       `(${info.algorithm}, trained on ${info.trainingRows.toLocaleString()} issues ` +
       `from ${info.projects} projects).`;
-  } else if (isGroqConfigured()) {
+  } else if (isLlmConfigured()) {
     try {
       const result = await generateJson(buildWeightPrompt(project, project.tasks));
       weights = normalizeWeights(project.tasks, result.tasks || []);
@@ -274,7 +274,7 @@ const analyzeTaskProgress = async ({ latestComment = "", organizationId, taskId,
   let progress = fallbackProgress(task, latestComment);
   let summary = "Deterministic progress fallback was used because Groq is not configured.";
 
-  if (isGroqConfigured()) {
+  if (isLlmConfigured()) {
     try {
       const result = await generateJson(buildProgressPrompt(task, latestComment));
       progress = clamp(result.progress);
