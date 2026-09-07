@@ -51,7 +51,9 @@ const resolvePlan = async (currentUser, plan, context) => {
     .map((action) => action.name);
 
   // Tasks are only looked up when an assign_task action actually needs one.
-  const needsTaskLookup = plan.actions.some((action) => action.type === "assign_task");
+  const needsTaskLookup = plan.actions.some(
+    (action) => action.type === "assign_task" || action.type === "update_task",
+  );
   const taskCandidates = needsTaskLookup
     ? (
         await prisma.task.findMany({
@@ -75,7 +77,12 @@ const resolvePlan = async (currentUser, plan, context) => {
       issues.push("You do not have permission to do this.");
     }
 
-    if (action.type === "create_task" || action.type === "assign_task") {
+    if (
+      action.type === "create_task" ||
+      action.type === "assign_task" ||
+      action.type === "update_task" ||
+      action.type === "update_project"
+    ) {
       if (action.project) {
         // A project created earlier in this same plan has no id yet, so it is carried as
         // a name and linked during execution.
@@ -84,6 +91,10 @@ const resolvePlan = async (currentUser, plan, context) => {
         );
 
         if (pendingName) {
+          if (action.type === "update_project") {
+            // The project does not exist yet, so set its details at creation instead.
+            issues.push('"' + action.project + '" is being created in this same request, so it cannot be updated.');
+          }
           resolved.projectId = null;
           resolved.pendingProjectName = pendingName;
           resolved.projectLabel = pendingName + " (new)";
@@ -100,7 +111,10 @@ const resolvePlan = async (currentUser, plan, context) => {
         }
       } else if (action.type === "create_task") {
         issues.push("No project was given for this task.");
+      } else if (action.type === "update_project") {
+        issues.push("No project was named to update.");
       }
+      // An update or assignment may name the task alone; the project only narrows the search.
     }
 
     if (action.assignee) {
@@ -115,7 +129,7 @@ const resolvePlan = async (currentUser, plan, context) => {
       }
     }
 
-    if (action.type === "assign_task") {
+    if (action.type === "assign_task" || action.type === "update_task") {
       const pool = resolved.projectId
         ? taskCandidates.filter((task) => task.projectId === resolved.projectId)
         : taskCandidates;
@@ -154,6 +168,27 @@ const describeAction = (action) => {
     else parts.push("unassigned");
     if (action.deadline) parts.push("due " + action.deadline);
     return parts.join(" · ");
+  }
+
+  if (action.type === "update_project") {
+    const changes = [];
+    if (action.name) changes.push("rename to " + action.name);
+    if (action.dueDate) changes.push("due " + action.dueDate);
+    if (action.priority) changes.push(action.priority + " priority");
+    if (action.status) changes.push("status " + action.status);
+    if (action.description) changes.push("new description");
+    return "Update project " + (action.projectLabel || action.project) + " · " + changes.join(" · ");
+  }
+
+  if (action.type === "update_task") {
+    const changes = [];
+    if (action.deadline) changes.push("due " + action.deadline);
+    if (action.priority) changes.push(action.priority + " priority");
+    if (action.status) changes.push("status " + action.status.replace(/_/g, " "));
+    if (action.estimatedHours !== null && action.estimatedHours !== undefined) {
+      changes.push(action.estimatedHours + "h estimated");
+    }
+    return "Update " + (action.taskLabel || action.task) + " · " + changes.join(" · ");
   }
 
   return "Assign " + (action.taskLabel || action.task) + " to " + (action.assigneeLabel || action.assignee);
@@ -267,6 +302,39 @@ const execute = async (currentUser, planToken) => {
           title: action.title,
         });
         results.push({ id: task.id, label: "Created task " + task.title, status: "done", type: action.type });
+        continue;
+      }
+
+      if (action.type === "update_project") {
+        const patch = {};
+        if (action.name) patch.name = action.name;
+        if (action.description) patch.description = action.description;
+        if (action.dueDate) patch.dueDate = action.dueDate;
+        if (action.priority) patch.priority = action.priority;
+        if (action.status) patch.status = action.status;
+
+        const project = await projectService.updateProject(action.projectId, currentUser, patch);
+        results.push({
+          id: project.id,
+          label: "Updated project " + project.name,
+          status: "done",
+          type: action.type,
+        });
+        continue;
+      }
+
+      if (action.type === "update_task") {
+        // Only the fields the user asked to change are sent, so nothing else is disturbed.
+        const patch = {};
+        if (action.deadline) patch.deadline = action.deadline;
+        if (action.priority) patch.priority = action.priority;
+        if (action.status) patch.status = action.status;
+        if (action.estimatedHours !== null && action.estimatedHours !== undefined) {
+          patch.estimatedHours = action.estimatedHours;
+        }
+
+        const updated = await taskService.updateTask(action.taskId, currentUser, patch);
+        results.push({ id: updated.id, label: "Updated " + updated.title, status: "done", type: action.type });
         continue;
       }
 

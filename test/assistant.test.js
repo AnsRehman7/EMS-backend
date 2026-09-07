@@ -225,3 +225,99 @@ test("previews describe the change in words, not JSON", () => {
     /unassigned/,
   );
 });
+
+/* -------------------------------------------------------------------------- */
+/* Editing existing records                                                    */
+/* -------------------------------------------------------------------------- */
+
+test("a task update keeps only the fields the user asked to change", () => {
+  const plan = normalizePlan({
+    actions: [
+      {
+        deadline: "2026-10-15",
+        estimatedHours: null,
+        priority: "HIGH",
+        status: "In Progress",
+        task: "Build the API",
+        type: "update_task",
+      },
+    ],
+  });
+
+  const [action] = plan.actions;
+  assert.equal(action.deadline, "2026-10-15");
+  assert.equal(action.priority, "high", "priority is lower-cased for the service layer");
+  assert.equal(action.status, "in_progress", "spoken status wording maps onto the stored value");
+  assert.equal(action.estimatedHours, null);
+});
+
+test("an unsupported status is dropped rather than passed through", () => {
+  const plan = normalizePlan({
+    actions: [{ status: "almost done", task: "Build the API", type: "update_task" }],
+  });
+
+  // Nothing recognisable was requested, so there is no change worth previewing.
+  assert.equal(plan.actions.length, 0);
+});
+
+test("an update naming no task, or changing nothing, is discarded", () => {
+  const plan = normalizePlan({
+    actions: [
+      { deadline: "2026-10-15", type: "update_task" },
+      { task: "Build the API", type: "update_task" },
+      { name: "New name", type: "update_project" },
+      { project: "Attendance Revamp", type: "update_project" },
+    ],
+  });
+
+  assert.equal(plan.actions.length, 0);
+});
+
+test("a project update coerces its status and priority", () => {
+  const plan = normalizePlan({
+    actions: [
+      {
+        dueDate: "2026-12-31",
+        priority: "CRITICAL",
+        project: "Attendance Revamp",
+        status: "Completed",
+        type: "update_project",
+      },
+    ],
+  });
+
+  const [action] = plan.actions;
+  assert.equal(action.priority, "critical");
+  assert.equal(action.status, "completed");
+  assert.equal(action.dueDate, "2026-12-31");
+});
+
+test("archiving is not something the assistant can do", () => {
+  // Archiving a project hides all of its work, so it stays a deliberate manual action.
+  const plan = normalizePlan({
+    actions: [{ project: "Attendance Revamp", status: "archived", type: "update_project" }],
+  });
+
+  assert.equal(plan.actions.length, 0);
+});
+
+test("edit previews name the record and list what changes", () => {
+  assert.equal(
+    describeAction({
+      deadline: "2026-10-15",
+      priority: "high",
+      taskLabel: "Build the API",
+      type: "update_task",
+    }),
+    "Update Build the API · due 2026-10-15 · high priority",
+  );
+
+  assert.equal(
+    describeAction({
+      name: "Attendance Overhaul",
+      projectLabel: "Attendance Revamp",
+      type: "update_project",
+    }),
+    "Update project Attendance Revamp · rename to Attendance Overhaul",
+  );
+});
