@@ -1,6 +1,6 @@
 const { z } = require("zod");
 const { env } = require("../config/env");
-const { generateJson, isLlmConfigured } = require("./llm.service");
+const { generateJson, isLlmConfigured, lastUsedModel } = require("./llm.service");
 
 const MAX_TASKS = 32;
 
@@ -151,6 +151,19 @@ Rules:
 - riskLevel is low, medium, high, or critical. priority is low, normal, or high.
 - Do not choose or name employees. DayMark calculates recommendations from capacity and skills.
 - Use no more than ${MAX_TASKS} tasks. projectWeight values should sum to 100.
+- Produce the SMALLEST number of tasks that still covers the scope. A shorter, well-sized
+  plan is better than a long one. Never pad the plan to look thorough.
+- Every task must be worth tracking on its own. If a piece of work would take under about
+  two hours, do not give it its own task - fold it into the related larger task and mention
+  it in that task's description or acceptance criteria instead.
+- Do not split one piece of work into separate "design", "implement", "test" and "document"
+  tasks unless each part is genuinely substantial and separately assignable. Prefer one task
+  whose acceptance criteria cover all of it.
+- Do not create administrative filler such as "kick-off meeting", "create repository",
+  "set up project", "daily standup", "final review" or "documentation" unless the brief
+  explicitly asks for it.
+- Merge tasks that would be done by the same person, at the same time, on the same file or
+  feature. Two tasks that always move together should be one task.
 - List assumptions explicitly. List unclear or absent information in missingRequirements.
 
 JSON schema:
@@ -198,14 +211,19 @@ const generateProjectPlanBlueprint = async ({ organization, project, requirement
   if (!isLlmConfigured()) {
     return {
       blueprint: fallbackBlueprint(requirements),
-      degradedReason: "Groq is not configured; DayMark used its deterministic planner.",
+      degradedReason: "No language model is configured; DayMark used its deterministic planner.",
       model: "staffflow-deterministic-v1",
     };
   }
 
   try {
     const rawPlan = await generateJson(buildPrompt({ organization, project, requirements }), { temperature: 0.1 });
-    return { blueprint: normalizePlanBlueprint(rawPlan, requirements), degradedReason: "", model: env.groqModel };
+    return {
+      blueprint: normalizePlanBlueprint(rawPlan, requirements),
+      degradedReason: "",
+      // The provider that actually answered, which is not always the one tried first.
+      model: lastUsedModel() || "unknown",
+    };
   } catch (error) {
     return {
       blueprint: fallbackBlueprint(requirements),

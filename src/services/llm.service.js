@@ -1,3 +1,4 @@
+const { env } = require("../config/env");
 const groq = require("./groq.service");
 const gemini = require("./gemini.service");
 
@@ -24,6 +25,16 @@ const isLlmConfigured = () => providers().some((provider) => provider.ready);
 /** Names the provider that will serve the next call, for logging and diagnostics. */
 const activeProvider = () => providers().find((provider) => provider.ready)?.name || null;
 
+/** Model id for a provider, so callers can record which one actually answered. */
+const modelFor = (name) => (name === "gemini" ? env.geminiModel : env.groqModel);
+
+// Which provider served the most recent successful call. Callers store this against the
+// generated plan, so it must reflect what really answered rather than what was configured
+// first - the two differ whenever the primary provider failed over.
+let lastUsed = null;
+
+const lastUsedModel = () => (lastUsed ? modelFor(lastUsed) : null);
+
 const generateJson = async (prompt, options = {}) => {
   const available = providers().filter((provider) => provider.ready);
 
@@ -35,7 +46,9 @@ const generateJson = async (prompt, options = {}) => {
   let lastError;
   for (const provider of available) {
     try {
-      return await provider.impl.generateJson(prompt, options);
+      const result = await provider.impl.generateJson(prompt, options);
+      lastUsed = provider.name;
+      return result;
     } catch (error) {
       lastError = error;
       // A refusal or malformed-response error is not worth retrying elsewhere.
@@ -51,4 +64,6 @@ module.exports = {
   activeProvider,
   generateJson,
   isLlmConfigured,
+  lastUsedModel,
+  modelFor,
 };
