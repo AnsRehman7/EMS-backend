@@ -135,6 +135,14 @@ const collectConfigIssues = (config = env, processEnv = process.env) => {
     );
   }
 
+  // AI features fall back from Gemini to Groq. Without Gemini every request goes straight
+  // to Groq, and a bad Groq key then surfaces as a Groq error that hides the real cause.
+  if (!config.geminiApiKey && !config.groqApiKey) {
+    warnings.push("No language model is configured, so the assistant and AI planning are unavailable. Set GEMINI_API_KEY.");
+  } else if (!config.geminiApiKey) {
+    warnings.push("GEMINI_API_KEY is not set, so the assistant and AI planning use Groq only. Set GEMINI_API_KEY to use Gemini first.");
+  }
+
   if (isProduction) {
     if (!hasAdminCredential) fatal.push("Firebase Admin credentials are required in production");
     if (!processEnv.DATABASE_URL) fatal.push("DATABASE_URL");

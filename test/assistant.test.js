@@ -565,7 +565,8 @@ test("the prompt carries the workspace, a calendar, and the conversation", () =>
   assert.match(prompt, /Fix login page bug \| Website Redesign \| Sara Khan/);
   assert.match(prompt, /User: create a task Fix login page bug/);
   assert.match(prompt, /## Message\nassign it to Sara$/);
-  assert.doesNotMatch(prompt, /not trained/i, "off-topic replies are polite, not a canned refusal");
+  assert.doesNotMatch(prompt, /I am not trained on that/i, "off-topic replies are polite, not a canned refusal");
+  assert.match(prompt, /how many projects do we have/, "counting any entity is routed to a data_query");
 });
 
 test("workspace text cannot break out of its row in the prompt", () => {
@@ -706,4 +707,117 @@ test("a project the model guessed does not narrow the task search, one the perso
   });
   assert.equal(named.executable, true);
   assert.equal(named.taskId, "t1");
+});
+
+/* -------------------------------------------------------------------------- */
+/* Questions about any entity                                                  */
+/* -------------------------------------------------------------------------- */
+
+const {
+  buildMeetingWhere,
+  buildMemberWhere,
+  buildProjectWhere,
+  buildTimeLogWhere,
+  formatGroups,
+  summarizeAttendance,
+} = require("../src/services/assistantReport.service");
+
+const superAdmin = { id: "u-admin", organizationId: "org1", role: "SUPER_ADMIN" };
+const employee = { id: "u-emp", organizationId: "org1", role: "EMPLOYEE" };
+
+test("users, employees and staff all mean team members, nested or flat filters", () => {
+  const plan = normalizePlan({
+    queries: [
+      { entity: "users", type: "data_query" },
+      { entity: "employees", filters: { role: "managers", status: "inactive" }, groupBy: "department", type: "data_query" },
+      { entity: "salaries", type: "data_query" },
+      { entity: "projects", status: "done", type: "data_query" },
+    ],
+  });
+
+  assert.deepEqual(plan.queries.map((query) => query.entity), ["members", "members", "projects"], "unknown entities are dropped");
+  assert.equal(plan.queries[1].role, "managers");
+  assert.equal(plan.queries[1].status, "suspended");
+  assert.equal(plan.queries[1].groupBy, "department");
+  assert.equal(plan.queries[2].status, "completed");
+});
+
+test("each entity only accepts its own grouping and status words", () => {
+  const plan = normalizePlan({
+    queries: [
+      { entity: "projects", groupBy: "department", type: "data_query" },
+      { entity: "meetings", status: "upcoming", type: "data_query" },
+      { entity: "attendance", filters: { date: "2026-11-04", status: "checked in" }, type: "data_query" },
+    ],
+  });
+  assert.equal(plan.queries[0].groupBy, "", "projects cannot be grouped by department");
+  assert.equal(plan.queries[1].status, "upcoming");
+  assert.equal(plan.queries[2].status, "present");
+  assert.equal(plan.queries[2].from, "2026-11-04");
+  assert.equal(plan.queries[2].to, "2026-11-04");
+});
+
+test("project questions stay inside the caller's scope and skip archived work by default", () => {
+  const scope = { deletedAt: null, organizationId: "org1" };
+  const plain = buildProjectWhere({}, {}, scope, "2026-11-04");
+  assert.deepEqual(plain.AND[0], scope);
+  assert.deepEqual(plain.AND[1].status, { not: "ARCHIVED" });
+
+  const archived = buildProjectWhere({ status: "archived" }, {}, scope, "2026-11-04").AND[1];
+  assert.equal(archived.status, "ARCHIVED");
+
+  const overdue = buildProjectWhere({ overdue: true }, { owner: { id: "u2" } }, scope, "2026-11-04").AND[1];
+  assert.deepEqual(overdue.status, { notIn: ["COMPLETED", "ARCHIVED"] });
+  assert.equal(overdue.ownerId, "u2");
+  assert.equal(overdue.dueDate.lt.toISOString(), "2026-11-04T00:00:00.000Z");
+});
+
+test("member questions are organization scoped and never pass an unknown role to the enum", () => {
+  const managers = buildMemberWhere({ role: "managers" }, "org1");
+  assert.equal(managers.organizationId, "org1");
+  const legacy = managers.OR.find((condition) => condition.AND);
+  assert.deepEqual(legacy.AND[1].role.in, ["MANAGER"]);
+
+  const designers = buildMemberWhere({ role: "Designer" }, "org1");
+  assert.equal(designers.OR.some((condition) => condition.AND), false, "a custom role has no legacy enum value");
+});
+
+test("an employee asking about time logs only ever sees their own", () => {
+  const where = buildTimeLogWhere({}, { assignee: { id: "someone-else" } }, employee, "UTC");
+  assert.deepEqual(where.AND[0], { task: { deletedAt: null, organizationId: "org1" } });
+  assert.ok(where.AND.some((condition) => condition.userId === "u-emp"), "own-time restriction is kept");
+  assert.ok(where.AND.some((condition) => condition.userId === "someone-else"), "and ANDed with the filter, so the result is empty");
+
+  const admin = buildTimeLogWhere({}, {}, superAdmin, "UTC");
+  assert.equal(admin.AND.some((condition) => condition.userId), false);
+});
+
+test("meetings are limited to ones the person organises or attends unless they manage meetings", () => {
+  const own = buildMeetingWhere({}, {}, employee, "UTC");
+  assert.deepEqual(own.AND[0].OR, [{ organizerId: "u-emp" }, { attendees: { some: { userId: "u-emp" } } }]);
+
+  const now = new Date("2026-11-04T10:00:00Z");
+  const upcoming = buildMeetingWhere({ status: "upcoming" }, {}, superAdmin, "UTC", now);
+  assert.equal(upcoming.AND[0].OR, undefined);
+  assert.equal(upcoming.AND[1].status, "SCHEDULED");
+  assert.equal(upcoming.AND[1].startsAt.gte, now);
+});
+
+test("attendance and grouped answers are worded from exact counts", () => {
+  assert.equal(
+    summarizeAttendance([
+      { checkInAt: "x", lateMinutes: 0, status: "checked_out" },
+      { checkInAt: "x", lateMinutes: 12, status: "late" },
+      { checkInAt: null, lateMinutes: 0, status: "absent" },
+      { checkInAt: null, lateMinutes: 0, status: "off_day" },
+    ]),
+    "2 present (1 late), 1 absent, 1 on a day off.",
+  );
+  assert.equal(
+    formatGroups("Team members by role", [
+      { count: 4, label: "Employee" },
+      { count: 1, label: "Manager" },
+    ]),
+    "Team members by role: Employee 4, Manager 1.",
+  );
 });

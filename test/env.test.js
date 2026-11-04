@@ -7,6 +7,7 @@ const productionConfig = (overrides = {}) => ({
   firebaseClientEmail: "svc@example.iam.gserviceaccount.com",
   firebasePrivateKey: "-----BEGIN PRIVATE KEY-----",
   firebaseProjectId: "staffflow",
+  geminiApiKey: "gemini-key",
   mailFromAddress: "no-reply@example.com",
   nodeEnv: "production",
   otpSecret: "a-long-random-secret",
@@ -76,4 +77,13 @@ test("development without SMTP is only a warning about console delivery", () => 
 
   assert.deepEqual(fatal, []);
   assert.ok(warnings.some((warning) => /logged to this console/.test(warning)));
+});
+
+test("a missing Gemini key warns, because the fallback alone would hide why AI fails", () => {
+  const groqOnly = collectConfigIssues(productionConfig({ geminiApiKey: undefined, groqApiKey: "groq-key" }), processEnv);
+  assert.deepEqual(groqOnly.fatal, []);
+  assert.match(groqOnly.warnings.join(" "), /GEMINI_API_KEY is not set/);
+
+  const none = collectConfigIssues(productionConfig({ geminiApiKey: undefined }), processEnv);
+  assert.match(none.warnings.join(" "), /No language model is configured/);
 });

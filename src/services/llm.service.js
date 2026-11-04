@@ -43,21 +43,23 @@ const generateJson = async (prompt, options = {}) => {
     return groq.generateJson(prompt, options);
   }
 
-  let lastError;
+  let firstError;
   for (const provider of available) {
     try {
       const result = await provider.impl.generateJson(prompt, options);
       lastUsed = provider.name;
       return result;
     } catch (error) {
-      lastError = error;
+      firstError = firstError || error;
       // A refusal or malformed-response error is not worth retrying elsewhere.
       if (error.statusCode && error.statusCode < 500) throw error;
-      console.warn(`[llm] ${provider.name} failed, trying the next provider:`, error.message);
+      console.warn(`[llm] ${provider.name} failed:`, error.message);
     }
   }
 
-  throw lastError;
+  // When every provider fails, the primary's error is the one worth showing: a broken
+  // fallback key would otherwise mask why the preferred provider did not answer.
+  throw firstError;
 };
 
 module.exports = {

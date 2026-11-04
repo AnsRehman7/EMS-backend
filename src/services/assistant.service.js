@@ -44,8 +44,12 @@ const ACTION_TYPES = [
   "update_project",
 ];
 
-/** Read-only questions the assistant may ask the database. */
-const QUERY_TYPES = ["task_report"];
+/**
+ * Read-only questions the assistant may ask the database. `task_report` is the earlier,
+ * tasks-only form and is still accepted as a data_query on tasks.
+ */
+const QUERY_TYPES = ["data_query", "task_report"];
+
 
 /** Task states the assistant may set, mapped from the words a person actually types. */
 const TASK_STATUSES = ["new", "open", "active", "in_progress", "blocked", "completed"];
@@ -134,6 +138,65 @@ const PROJECT_PRIORITY_WORDS = {
   highest: "critical",
   urgent: "critical",
 };
+
+/**
+ * What the model may query, and how each entity may be grouped. This is the allowlist for
+ * reads, in the same way ACTION_TYPES is for writes: the model names an entity and fields
+ * from here, and the report service compiles them into a scoped query. It never writes SQL.
+ */
+const QUERY_ENTITIES = {
+  attendance: { groupBy: ["status", "department"] },
+  meetings: { groupBy: ["status", "project", "organizer"] },
+  members: { groupBy: ["role", "department", "designation", "status"] },
+  projects: { groupBy: ["status", "priority", "owner"] },
+  tasks: { groupBy: ["assignee", "project", "status", "priority", "category"] },
+  time_logs: { groupBy: ["assignee", "project", "task"] },
+};
+
+/** Words people use for each entity, so "users" and "employees" both mean members. */
+const ENTITY_WORDS = {
+  attendance: "attendance",
+  employees: "members",
+  hours: "time_logs",
+  meetings: "meetings",
+  members: "members",
+  people: "members",
+  projects: "projects",
+  staff: "members",
+  tasks: "tasks",
+  team: "members",
+  time_logs: "time_logs",
+  timelogs: "time_logs",
+  users: "members",
+};
+
+/** Status words per entity. Anything unrecognised is dropped rather than guessed. */
+const QUERY_STATUS_WORDS = {
+  attendance: {
+    absent: "absent",
+    checked_in: "present",
+    checked_out: "checked_out",
+    in_office: "in_office",
+    late: "late",
+    left: "checked_out",
+    present: "present",
+    working: "in_office",
+  },
+  meetings: {
+    canceled: "cancelled",
+    cancelled: "cancelled",
+    completed: "completed",
+    done: "completed",
+    held: "completed",
+    scheduled: "scheduled",
+    upcoming: "upcoming",
+  },
+  members: { active: "active", deactivated: "suspended", disabled: "suspended", inactive: "suspended", suspended: "suspended" },
+  projects: { ...PROJECT_STATUS_WORDS, archived: "archived", open: "open" },
+};
+
+/** Fields that name a person, under every key the model tends to use for them. */
+const PERSON_KEYS = ["assignee", "person", "member", "user", "employee", "attendee", "loggedBy"];
 
 const PERMISSION_FOR_ACTION = {
   assign_task: PERMISSIONS.TASKS_EDIT,
@@ -524,23 +587,36 @@ const buildPrompt = (message, context, history = []) => {
     '{ "type": "update_task", "task": "existing task title", "project": "project name or null", "newTitle": "or null", "description": "or null", "assignee": "person name or null", "deadline": "YYYY-MM-DD or null", "priority": "low|normal|high or null", "status": "new|active|in_progress|blocked|completed or null", "estimatedHours": number or null }',
     '{ "type": "update_project", "project": "existing project name", "name": "new name or null", "description": "or null", "owner": "person name or null", "startDate": "YYYY-MM-DD or null", "dueDate": "YYYY-MM-DD or null", "priority": "low|normal|high|critical or null", "status": "planned|active|completed or null" }',
     "",
-    "Query shape (the system runs it and writes the exact numbers into the answer):",
-    '{ "type": "task_report", "project": "project name or null", "assignee": "person name, \\"me\\", or null", "unassigned": false, "status": "new|active|in_progress|blocked|completed|open|null", "priority": "low|normal|high or null", "overdue": false, "dueFrom": "YYYY-MM-DD or null", "dueTo": "YYYY-MM-DD or null", "groupBy": "assignee|project|null", "list": false }',
-    '"status": "open" means every task that is not completed. Set "list" true when the user wants to see the tasks, not only a count.',
-    'Set "groupBy" to compare across people or projects ("who has the most tasks", "completed tasks in each project").',
+    "Query shape - the system runs it against the database and writes the exact answer:",
+    '{ "type": "data_query", "entity": "tasks|projects|members|meetings|time_logs|attendance", "filters": { ... }, "groupBy": "field or null", "list": false }',
+    "Filters each entity accepts (leave out any you do not need; names may be typed loosely):",
+    '- tasks: project, assignee (person or "me"), unassigned (true), status (new|active|in_progress|blocked|completed|open),',
+    "  priority (low|normal|high), overdue (true), dueFrom, dueTo, category, search. groupBy: assignee|project|status|priority|category",
+    "- projects: status (planned|active|completed|archived|open), priority (low|normal|high|critical), owner, overdue (true),",
+    "  dueFrom, dueTo, search. groupBy: status|priority|owner",
+    "- members (team members, users, employees, staff, people): role, department, designation, status (active|suspended),",
+    "  search. groupBy: role|department|designation|status",
+    "- meetings: status (scheduled|upcoming|completed|cancelled), project, organizer, assignee (an attendee), from, to.",
+    "  groupBy: status|project|organizer",
+    "- time_logs (hours worked or logged): assignee (who logged), project, task, from, to. groupBy: assignee|project|task",
+    "- attendance (present, absent, late, checked in or out): from, to (default today; at most 31 days), assignee,",
+    "  department, status (present|absent|late|checked_out|in_office). groupBy: status|department",
+    'Dates are YYYY-MM-DD. "open" means not completed. Set "list" true to show the matching records, not only a count.',
     "",
     "## How to respond",
     "Questions about the workspace (intent question):",
-    "- Any question about HOW MANY tasks, or that asks to LIST or SHOW tasks - total, completed, pending,",
-    "  in progress, blocked, overdue, due this week, per project, per person - must use a task_report query.",
-    "  Put one query per distinct question (at most 3); a comparison across everyone is ONE query with groupBy,",
-    "  never one query per person. Leave reply empty or a short lead-in with NO numbers;",
-    "  the system computes the numbers and they must not be guessed.",
-    "- Everything else answerable from the data above - project status, priority, due dates, owners, who is",
-    "  in the team, roles, workload, which project is behind, what a task's deadline is - answer directly",
-    "  in reply, using the data above. Be specific, use real names, keep it under about 80 words.",
-    "- If the data needed is not above (for example attendance, leave, salary, or anything private you were",
-    "  not shown), say plainly that you cannot see that here and suggest the right page of the app.",
+    "- Any question asking HOW MANY, a TOTAL, a LIST, WHICH or WHO, or a breakdown - of tasks, projects, team",
+    "  members, meetings, hours logged or attendance - must use a data_query. This includes questions such as",
+    '  "how many projects do we have", "total users", "who is absent today", "hours Sara logged this week".',
+    "  One query per distinct question (at most 3); a comparison across everyone is ONE query with groupBy, never",
+    "  one query per person. Leave reply empty or a short lead-in with NO numbers - the system computes them.",
+    "- Simple facts about one record that the data above shows - a project's due date or owner, a task's",
+    "  status, someone's role - answer directly in reply. Be specific, use real names, stay under about 80 words.",
+    "- Everything about this workspace's people, projects, tasks, meetings, time and attendance is in scope.",
+    '  Never say you "can only manage" something or are "not trained". If one kind of data genuinely does not',
+    "  exist here (salary, leave, payroll), say that specific data is not available in Emplytic.",
+    '- If the user corrects you or rephrases ("I asked about projects"), answer the corrected question in full,',
+    "  with the right query - do not only apologise.",
     "",
     "Changes (intent action): create or update projects and tasks, and assign tasks to people.",
     "- Use assign_task only to change who owns an existing task. Use update_task for any other change to",
@@ -580,9 +656,8 @@ const buildPrompt = (message, context, history = []) => {
     '"question" and return no actions.',
     "",
     "Chat (intent chat): greetings, thanks, \"what can you do\" - reply warmly in one or two sentences with",
-    "a couple of example requests. For requests unrelated to work in this workspace (general knowledge,",
-    "coding, news) reply politely that you are focused on this workspace's projects, tasks and team, and",
-    "offer what you can do instead.",
+    "a couple of example requests. Only for requests with nothing to do with this workspace (general",
+    "knowledge, coding, news) reply politely that you are focused on this workspace, and offer what you can do.",
     "",
     "Safety:",
     "- Use only the action and query types above. Never invent ids. Never delete or archive anything;",
@@ -739,24 +814,49 @@ const isActionable = (action) => {
   return Boolean(action.task && action.assignee);
 };
 
-const normalizeQuery = (query) => {
-  const status = wordKey(query.status) === "overdue" ? "" : asStatus(query.status);
+const normalizeQuery = (rawQuery) => {
+  // Filters may arrive nested under "filters" or flat on the query; both are accepted.
+  const query = { ...rawQuery, ...(rawQuery.filters && typeof rawQuery.filters === "object" ? rawQuery.filters : {}) };
+  const entity =
+    rawQuery.type === "task_report" ? "tasks" : ENTITY_WORDS[wordKey(rawQuery.entity)] || "";
+  if (!entity) return null;
+
+  const statusWord = wordKey(query.status);
+  const status =
+    entity === "tasks"
+      ? statusWord === "overdue"
+        ? ""
+        : asStatus(query.status)
+      : QUERY_STATUS_WORDS[entity]?.[statusWord] || "";
+  const person = PERSON_KEYS.map((key) => asString(query[key], 160)).find(Boolean) || "";
+  const dateOf = (...keys) => keys.map((key) => asIsoDate(query[key])).find(Boolean) || "";
+
   return {
-    assignee: asString(query.assignee, 160),
-    dueFrom: asIsoDate(query.dueFrom),
-    dueTo: asIsoDate(query.dueTo),
-    groupBy: ["assignee", "project"].includes(String(query.groupBy)) ? String(query.groupBy) : "",
-    list: asBoolean(query.list),
+    assignee: person,
+    category: asString(query.category, 80),
+    department: asString(query.department, 80),
+    designation: asString(query.designation, 80),
+    dueFrom: dateOf("dueFrom"),
+    dueTo: dateOf("dueTo"),
+    entity,
+    from: dateOf("from", "date", "dateFrom", "startDate"),
+    groupBy: QUERY_ENTITIES[entity].groupBy.includes(String(rawQuery.groupBy)) ? String(rawQuery.groupBy) : "",
+    list: asBoolean(rawQuery.list ?? query.list),
+    organizer: asString(query.organizer, 160),
     // "overdue" is a deadline condition rather than a status, but people ask it as one.
-    overdue: asBoolean(query.overdue) || wordKey(query.status) === "overdue",
-    priority: asOptionalPriority(query.priority),
+    overdue: asBoolean(query.overdue) || statusWord === "overdue",
+    owner: asString(query.owner, 160),
+    priority: asOptionalPriority(query.priority, entity === "projects" ? PROJECT_PRIORITY_WORDS : TASK_PRIORITY_WORDS),
     project: asString(query.project, 160),
+    role: asString(query.role, 80),
+    search: asString(query.search, 120),
     status,
-    type: "task_report",
+    task: asString(query.task, 160),
+    to: dateOf("to", "dateTo", "endDate") || (asIsoDate(query.date) ? asIsoDate(query.date) : ""),
+    type: "data_query",
     unassigned: asBoolean(query.unassigned),
   };
 };
-
 /**
  * Normalizes whatever the model returned into a known shape.
  *
@@ -774,8 +874,9 @@ const normalizePlan = (raw) => {
   const rawQueries = Array.isArray(raw && raw.queries) ? raw.queries : [];
   const queries = rawQueries
     .filter((query) => QUERY_TYPES.includes(String(query && query.type)))
-    .slice(0, MAX_QUERIES)
-    .map(normalizeQuery);
+    .map(normalizeQuery)
+    .filter(Boolean)
+    .slice(0, MAX_QUERIES);
 
   const intent = INTENTS.includes(String(raw && raw.intent)) ? String(raw.intent) : "";
 
@@ -820,6 +921,7 @@ module.exports = {
   PLAN_TTL_MS,
   PROJECT_PRIORITY_WORDS,
   PROJECT_STATUSES,
+  QUERY_ENTITIES,
   QUERY_TYPES,
   signPlan,
   startOfDayUtc,
