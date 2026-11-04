@@ -7,7 +7,7 @@
  *   node scripts/predict-weights.js            (runs a built-in sample project)
  *
  * The point of this script is verifiability: it loads the same model file the API uses
- * and prints the same numbers the UI displays, so the weights shown in DayMark can be
+ * and prints the same numbers the UI displays, so the weights shown in Emplytic can be
  * reproduced by hand at any time.
  */
 

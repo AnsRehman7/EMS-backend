@@ -1,8 +1,14 @@
-const prisma = require("../db/prisma");
 const ApiError = require("../utils/apiError");
 const { generateJson, isLlmConfigured } = require("./llm.service");
 const { hasPermission } = require("../utils/permissions");
-const { projectCandidate, resolveEntity, userCandidate } = require("./assistantResolver.service");
+const { runReports } = require("./assistantReport.service");
+const {
+  normalize,
+  projectCandidate,
+  resolveEntity,
+  taskCandidate,
+  userCandidate,
+} = require("./assistantResolver.service");
 const { safelyRecordAudit } = require("./audit.service");
 const projectService = require("./project.service");
 const taskService = require("./task.service");
@@ -10,6 +16,7 @@ const {
   buildPrompt,
   loadContext,
   MAX_ACTIONS,
+  normalizeHistory,
   normalizePlan,
   PERMISSION_FOR_ACTION,
   PLAN_TTL_MS,
@@ -36,53 +43,103 @@ const describeCandidates = (candidates) =>
     .join(", ");
 
 /**
- * Resolves the people and projects named in a plan.
+ * Tappable answers for a name that was ambiguous or not found. Each carries the message
+ * the panel sends on the person's behalf; with the conversation history the model then
+ * re-plans the original request using the chosen name.
+ */
+const choicesFor = (typed, candidates) =>
+  candidates.slice(0, 4).map((candidate) => ({
+    label: candidate.name + (candidate.email ? " · " + candidate.email : ""),
+    prompt: 'I meant "' + candidate.name + '" (for "' + typed + '"). Please go ahead with my request.',
+  }));
+
+/**
+ * Resolves one name and records the outcome on the action: the id and label on success,
+ * otherwise an issue that blocks the action and choices the person can pick from.
+ */
+const resolveInto = (resolved, { candidates, idKey, kind, labelKey, query, said = "", typed }) => {
+  let match = resolveEntity(query, candidates);
+  let shown = query;
+
+  // The model maps what was typed onto a listed name, which is what fixes "logn page".
+  // It will also "helpfully" turn "ahmed" into one particular Ahmed. So the person's own
+  // words are resolved too, and when they fit several records the model's pick is
+  // overruled by a question - unless the person has typed that full name themselves.
+  if (
+    match.status === "resolved" &&
+    typed &&
+    normalize(typed) !== normalize(query) &&
+    !said.includes(normalize(match.match.name))
+  ) {
+    const literal = resolveEntity(typed, candidates);
+    if (literal.status === "ambiguous" && literal.candidates.some((candidate) => candidate.id === match.match.id)) {
+      match = literal;
+      shown = typed;
+    } else if (literal.status === "resolved" && literal.match.id !== match.match.id) {
+      match = { candidates: [literal.match, match.match], status: "ambiguous" };
+      shown = typed;
+    }
+  }
+
+  if (match.status === "resolved") {
+    resolved[idKey] = match.match.id;
+    resolved[labelKey] = match.match.name;
+    return match.match;
+  }
+  if (match.status === "ambiguous") {
+    resolved.issues.push('"' + shown + '" matches several ' + kind.plural + ": " + describeCandidates(match.candidates));
+    resolved.choices.push(...choicesFor(shown, match.candidates));
+  } else {
+    resolved.issues.push(
+      "No " + kind.singular + ' called "' + query + '" was found' +
+        (match.suggestions.length ? ". Did you mean " + describeCandidates(match.suggestions) + "?" : "."),
+    );
+    resolved.choices.push(...choicesFor(shown, match.suggestions));
+  }
+  return null;
+};
+
+const KINDS = {
+  person: { plural: "people", singular: "active team member" },
+  project: { plural: "projects", singular: "project" },
+  task: { plural: "tasks", singular: "task" },
+};
+
+/**
+ * Resolves the people, projects and tasks named in a plan.
  *
  * A task may reference a project being created earlier in the same plan, so new projects
  * are matched by name before existing ones. Anything unresolved becomes a blocking issue
- * on that action rather than a silent drop - the user is told exactly what was not found.
+ * on that action rather than a silent drop - the user is told exactly what was not found
+ * and offered the closest matches to pick from.
+ *
+ * Tasks are matched against the caller's own task scope from the context snapshot,
+ * completed ones included so "reopen the login task" works; open tasks win a tie.
  */
-const resolvePlan = async (currentUser, plan, context) => {
+const resolvePlan = async (currentUser, plan, context, conversation = {}) => {
+  // Everything the person has typed in this exchange, for the full-name check in resolveInto.
+  const said = normalize(
+    [
+      ...(conversation.history || []).filter((turn) => turn.role === "user").map((turn) => turn.text),
+      conversation.message || "",
+    ].join(" "),
+  );
   const userCandidates = context.users.map(userCandidate);
   const projectCandidates = context.projects.map(projectCandidate);
+  const taskCandidates = context.tasks.map(taskCandidate);
 
   const newProjectNames = plan.actions
     .filter((action) => action.type === "create_project")
     .map((action) => action.name);
 
-  // Tasks are only looked up when an assign_task action actually needs one.
-  const needsTaskLookup = plan.actions.some(
-    (action) => action.type === "assign_task" || action.type === "update_task",
-  );
-  const taskCandidates = needsTaskLookup
-    ? (
-        await prisma.task.findMany({
-          orderBy: { updatedAt: "desc" },
-          select: { id: true, projectId: true, title: true },
-          take: 300,
-          where: {
-            deletedAt: null,
-            organizationId: currentUser.organizationId,
-            status: { not: "COMPLETED" },
-          },
-        })
-      ).map((task) => ({ id: task.id, labels: [task.title], name: task.title, projectId: task.projectId }))
-    : [];
-
   return plan.actions.map((action, index) => {
-    const issues = [];
-    const resolved = { ...action, index };
+    const resolved = { ...action, choices: [], index, issues: [] };
 
     if (!hasPermission(currentUser, PERMISSION_FOR_ACTION[action.type])) {
-      issues.push("You do not have permission to do this.");
+      resolved.issues.push("You do not have permission to do this.");
     }
 
-    if (
-      action.type === "create_task" ||
-      action.type === "assign_task" ||
-      action.type === "update_task" ||
-      action.type === "update_project"
-    ) {
+    if (action.type !== "create_project") {
       if (action.project) {
         // A project created earlier in this same plan has no id yet, so it is carried as
         // a name and linked during execution.
@@ -93,58 +150,79 @@ const resolvePlan = async (currentUser, plan, context) => {
         if (pendingName) {
           if (action.type === "update_project") {
             // The project does not exist yet, so set its details at creation instead.
-            issues.push('"' + action.project + '" is being created in this same request, so it cannot be updated.');
+            resolved.issues.push('"' + action.project + '" is being created in this same request, so it cannot be updated.');
           }
           resolved.projectId = null;
           resolved.pendingProjectName = pendingName;
           resolved.projectLabel = pendingName + " (new)";
         } else {
-          const match = resolveEntity(action.project, projectCandidates);
-          if (match.status === "resolved") {
-            resolved.projectId = match.match.id;
-            resolved.projectLabel = match.match.name;
-          } else if (match.status === "ambiguous") {
-            issues.push('"' + action.project + '" matches several projects: ' + describeCandidates(match.candidates));
-          } else {
-            issues.push('No project called "' + action.project + '" exists.');
-          }
+          resolveInto(resolved, {
+            candidates: projectCandidates,
+            idKey: "projectId",
+            kind: KINDS.project,
+            labelKey: "projectLabel",
+            query: action.project,
+            said,
+            typed: action.typed?.project,
+          });
         }
       } else if (action.type === "create_task") {
-        issues.push("No project was given for this task.");
+        resolved.issues.push("No project was given for this task. Which project should it go in?");
       } else if (action.type === "update_project") {
-        issues.push("No project was named to update.");
+        resolved.issues.push("No project was named to update.");
       }
       // An update or assignment may name the task alone; the project only narrows the search.
     }
 
     if (action.assignee) {
-      const match = resolveEntity(action.assignee, userCandidates);
-      if (match.status === "resolved") {
-        resolved.assignedToId = match.match.id;
-        resolved.assigneeLabel = match.match.name;
-      } else if (match.status === "ambiguous") {
-        issues.push('"' + action.assignee + '" matches several people: ' + describeCandidates(match.candidates));
-      } else {
-        issues.push('No active team member called "' + action.assignee + '" was found.');
-      }
+      resolveInto(resolved, {
+        candidates: userCandidates,
+        idKey: "assignedToId",
+        kind: KINDS.person,
+        labelKey: "assigneeLabel",
+        query: action.assignee,
+        said,
+        typed: action.typed?.assignee,
+      });
+    }
+
+    if (action.type === "update_project" && action.owner) {
+      resolveInto(resolved, {
+        candidates: userCandidates,
+        idKey: "ownerId",
+        kind: KINDS.person,
+        labelKey: "ownerLabel",
+        query: action.owner,
+        said,
+        typed: action.typed?.owner,
+      });
     }
 
     if (action.type === "assign_task" || action.type === "update_task") {
-      const pool = resolved.projectId
-        ? taskCandidates.filter((task) => task.projectId === resolved.projectId)
-        : taskCandidates;
-      const match = resolveEntity(action.task, pool);
-      if (match.status === "resolved") {
-        resolved.taskId = match.match.id;
-        resolved.taskLabel = match.match.name;
-      } else if (match.status === "ambiguous") {
-        issues.push('"' + action.task + '" matches several tasks: ' + describeCandidates(match.candidates));
-      } else {
-        issues.push('No open task called "' + action.task + '" was found.');
-      }
+      // A project the model filled in on its own is its guess at which task was meant, so
+      // it must not narrow the search: only a project the person named does.
+      const typed = action.typed || {};
+      const personNamedProject = Boolean(typed.project) || !Object.keys(typed).length;
+      const inProject =
+        resolved.projectId && personNamedProject
+          ? taskCandidates.filter((task) => task.projectId === resolved.projectId)
+          : [];
+      // The project narrows the search, but when nothing in it matches - the model or the
+      // person named the wrong project - the whole task list is still searched.
+      const pool =
+        inProject.length && resolveEntity(action.task, inProject).status !== "unknown" ? inProject : taskCandidates;
+      resolveInto(resolved, {
+        candidates: pool,
+        idKey: "taskId",
+        kind: KINDS.task,
+        labelKey: "taskLabel",
+        query: action.task,
+        said,
+        typed: action.typed?.task,
+      });
     }
 
-    return { ...resolved, issues, executable: issues.length === 0 };
+    return { ...resolved, executable: resolved.issues.length === 0 };
   });
 };
 
@@ -173,6 +251,8 @@ const describeAction = (action) => {
   if (action.type === "update_project") {
     const changes = [];
     if (action.name) changes.push("rename to " + action.name);
+    if (action.ownerLabel || action.owner) changes.push("owner " + (action.ownerLabel || action.owner));
+    if (action.startDate) changes.push("starts " + action.startDate);
     if (action.dueDate) changes.push("due " + action.dueDate);
     if (action.priority) changes.push(action.priority + " priority");
     if (action.status) changes.push("status " + action.status);
@@ -182,12 +262,17 @@ const describeAction = (action) => {
 
   if (action.type === "update_task") {
     const changes = [];
+    if (action.newTitle) changes.push("rename to " + action.newTitle);
+    if (action.assigneeLabel || action.assignee) {
+      changes.push("assign to " + (action.assigneeLabel || action.assignee));
+    }
     if (action.deadline) changes.push("due " + action.deadline);
     if (action.priority) changes.push(action.priority + " priority");
     if (action.status) changes.push("status " + action.status.replace(/_/g, " "));
     if (action.estimatedHours !== null && action.estimatedHours !== undefined) {
       changes.push(action.estimatedHours + "h estimated");
     }
+    if (action.description) changes.push("new description");
     return "Update " + (action.taskLabel || action.task) + " · " + changes.join(" · ");
   }
 
@@ -198,27 +283,56 @@ const describeAction = (action) => {
 /* Interpret                                                                   */
 /* -------------------------------------------------------------------------- */
 
-const interpret = async (currentUser, message) => {
+/** What the panel shows when the model understood nothing it could act on or answer. */
+const FALLBACK_REPLY =
+  "I'm not sure I followed. I can answer questions about your projects, tasks and team, " +
+  'or make changes - for example "How many tasks are completed in Website Redesign?" or ' +
+  '"Assign the login task to Sara".';
+
+const NOTHING_TO_CHANGE_REPLY =
+  "I understood you want to change something, but not which record or what to change. " +
+  'Name the task or project and the change - for example "Mark the login page task as done".';
+
+const interpret = async (currentUser, message, history = []) => {
   if (!isLlmConfigured()) {
     throw new ApiError(503, "The assistant is unavailable because no language model is configured.");
   }
 
   const context = await loadContext(currentUser);
-  const raw = await generateJson(buildPrompt(message, context), { temperature: 0.1 });
+  const conversation = { history: normalizeHistory(history), message };
+  const raw = await generateJson(buildPrompt(message, context, conversation.history), { temperature: 0.1 });
   const plan = normalizePlan(raw);
 
-  if (plan.needsClarification && plan.question) {
-    return { actions: [], planToken: null, reply: plan.question, status: "clarify" };
-  }
+  // Questions are answered with numbers the database counted, not numbers the model wrote.
+  const report = plan.queries.length
+    ? await runReports(currentUser, plan.queries, context)
+    : { choices: [], items: [], text: "" };
 
   if (!plan.actions.length) {
-    return { actions: [], planToken: null, reply: plan.reply, status: "answered" };
+    if (report.text) {
+      return {
+        actions: [],
+        choices: report.choices,
+        items: report.items,
+        planToken: null,
+        reply: report.text,
+        status: report.choices.length ? "clarify" : "answered",
+      };
+    }
+    if (plan.needsClarification && (plan.question || plan.reply)) {
+      return { actions: [], choices: [], items: [], planToken: null, reply: plan.question || plan.reply, status: "clarify" };
+    }
+    if (plan.dropped) {
+      return { actions: [], choices: [], items: [], planToken: null, reply: NOTHING_TO_CHANGE_REPLY, status: "clarify" };
+    }
+    return { actions: [], choices: [], items: [], planToken: null, reply: plan.reply || FALLBACK_REPLY, status: "answered" };
   }
 
-  const resolved = await resolvePlan(currentUser, plan, context);
+  const resolved = await resolvePlan(currentUser, plan, context, conversation);
   const executable = resolved.filter((action) => action.executable);
 
   const actions = resolved.map((action) => ({
+    choices: action.choices,
     description: describeAction(action),
     executable: action.executable,
     index: action.index,
@@ -230,17 +344,28 @@ const interpret = async (currentUser, message) => {
   // the user was shown as blocked cannot be executed even if the token is replayed.
   const planToken = executable.length
     ? signPlan({
-        actions: executable,
+        actions: executable.map(({ choices, issues, typed, ...action }) => action),
         expiresAt: Date.now() + PLAN_TTL_MS,
         organizationId: currentUser.organizationId,
         userId: currentUser.id,
       })
     : null;
 
+  // The model's reply describes the plan as it imagined it. Once resolution has blocked a
+  // step - an ambiguous name, a missing permission - that description is no longer true.
+  const blockedCount = resolved.length - executable.length;
+  const lead = !blockedCount
+    ? plan.reply || "Here is what I will do. Review it and press Apply."
+    : executable.length
+      ? "I can do part of this. Review what is ready, and answer the notes below for the rest."
+      : "I need a little more before I can do this - see the notes below.";
+
   return {
     actions,
+    choices: report.choices,
+    items: report.items,
     planToken,
-    reply: plan.reply,
+    reply: [report.text, lead].filter(Boolean).join("\n"),
     status: executable.length ? "preview" : "blocked",
   };
 };
@@ -312,6 +437,8 @@ const execute = async (currentUser, planToken) => {
         if (action.dueDate) patch.dueDate = action.dueDate;
         if (action.priority) patch.priority = action.priority;
         if (action.status) patch.status = action.status;
+        if (action.ownerId) patch.ownerId = action.ownerId;
+        if (action.startDate) patch.startDate = action.startDate;
 
         const project = await projectService.updateProject(action.projectId, currentUser, patch);
         results.push({
@@ -332,6 +459,9 @@ const execute = async (currentUser, planToken) => {
         if (action.estimatedHours !== null && action.estimatedHours !== undefined) {
           patch.estimatedHours = action.estimatedHours;
         }
+        if (action.newTitle) patch.title = action.newTitle;
+        if (action.description) patch.description = action.description;
+        if (action.assignedToId) patch.assignedToId = action.assignedToId;
 
         const updated = await taskService.updateTask(action.taskId, currentUser, patch);
         results.push({ id: updated.id, label: "Updated " + updated.title, status: "done", type: action.type });

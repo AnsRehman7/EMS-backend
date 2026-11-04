@@ -4,7 +4,7 @@ const { assistantExecuteSchema, assistantMessageSchema, parseBody } = require(".
 
 const interpretMessage = asyncHandler(async (req, res) => {
   const payload = parseBody(assistantMessageSchema, req.body);
-  const result = await assistantRunner.interpret(req.user, payload.message);
+  const result = await assistantRunner.interpret(req.user, payload.message, payload.history);
   res.status(200).json({ data: result });
 });
 

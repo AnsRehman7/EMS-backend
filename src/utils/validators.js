@@ -587,6 +587,18 @@ const customRecordSchema = z.object({
 });
 
 const assistantMessageSchema = z.object({
+  // Recent turns of the conversation, so follow-ups such as "assign it to Sara" resolve.
+  // Client supplied and therefore untrusted; it only ever reaches the prompt as data.
+  history: z
+    .array(
+      z.object({
+        role: z.enum(["user", "assistant"]),
+        text: z.string().max(4000),
+      }),
+    )
+    .max(20)
+    .optional()
+    .default([]),
   message: z.string().trim().min(1, "Type what you want to do.").max(1000),
 });
 

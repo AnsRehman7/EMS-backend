@@ -149,7 +149,7 @@ Rules:
 - requiredSkills contains concise professional skill tags used for explainable assignee recommendations.
 - confidence is 0-100 and expresses confidence that scope and effort are adequate.
 - riskLevel is low, medium, high, or critical. priority is low, normal, or high.
-- Do not choose or name employees. DayMark calculates recommendations from capacity and skills.
+- Do not choose or name employees. Emplytic calculates recommendations from capacity and skills.
 - Use no more than ${MAX_TASKS} tasks. projectWeight values should sum to 100.
 - Produce the SMALLEST number of tasks that still covers the scope. A shorter, well-sized
   plan is better than a long one. Never pad the plan to look thorough.
@@ -211,7 +211,7 @@ const generateProjectPlanBlueprint = async ({ organization, project, requirement
   if (!isLlmConfigured()) {
     return {
       blueprint: fallbackBlueprint(requirements),
-      degradedReason: "No language model is configured; DayMark used its deterministic planner.",
+      degradedReason: "No language model is configured; Emplytic used its deterministic planner.",
       model: "staffflow-deterministic-v1",
     };
   }
@@ -227,7 +227,7 @@ const generateProjectPlanBlueprint = async ({ organization, project, requirement
   } catch (error) {
     return {
       blueprint: fallbackBlueprint(requirements),
-      degradedReason: `AI planning was unavailable (${error.message}); DayMark used its deterministic planner.`,
+      degradedReason: `AI planning was unavailable (${error.message}); Emplytic used its deterministic planner.`,
       model: "staffflow-deterministic-v1",
     };
   }
