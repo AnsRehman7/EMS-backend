@@ -10,6 +10,7 @@ const {
   userCandidate,
 } = require("./assistantResolver.service");
 const { safelyRecordAudit } = require("./audit.service");
+const { createTaskSchema, parseBody } = require("../utils/validators");
 const projectService = require("./project.service");
 const taskService = require("./task.service");
 const {
@@ -416,16 +417,20 @@ const execute = async (currentUser, planToken) => {
           continue;
         }
 
-        const task = await taskService.createTask(currentUser, {
-          assignedToId: action.assignedToId || null,
-          category: action.category,
-          deadline: action.deadline || undefined,
-          description: action.description || action.title,
-          estimatedHours: action.estimatedHours === null ? undefined : action.estimatedHours,
-          priority: action.priority,
-          projectId,
-          title: action.title,
-        });
+        // Parsed like the HTTP body so status, riskLevel and the other defaults match a task made by hand.
+        const task = await taskService.createTask(
+          currentUser,
+          parseBody(createTaskSchema, {
+            assignedToId: action.assignedToId || null,
+            category: action.category,
+            deadline: action.deadline || undefined,
+            description: action.description || action.title,
+            estimatedHours: action.estimatedHours === null ? undefined : action.estimatedHours,
+            priority: action.priority,
+            projectId,
+            title: action.title,
+          }),
+        );
         results.push({ id: task.id, label: "Created task " + task.title, status: "done", type: action.type });
         continue;
       }
