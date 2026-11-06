@@ -602,6 +602,8 @@ const approvePlan = async (currentUser, projectId, planId, options = {}) => {
     1,
     Math.round((Date.now() - plan.createdAt.getTime()) / 1000),
   );
+  // A create, an update, and a notification per task, each a round trip to Neon, easily
+  // outlasts Prisma's 5s interactive-transaction default on a plan of a dozen tasks.
   const outboxEventId = await prisma.$transaction(async (transaction) => {
     await transaction.$queryRaw`SELECT "id" FROM "projects" WHERE "id" = ${projectId} FOR UPDATE`;
     const existingApprovedPlan = await transaction.projectPlan.findFirst({
@@ -723,7 +725,7 @@ const approvePlan = async (currentUser, projectId, planId, options = {}) => {
       },
     });
     return outboxEvent.id;
-  });
+  }, { maxWait: 10_000, timeout: 30_000 });
   await safelyDeliverOutboxEvent(outboxEventId);
 
   // The draft plan carries weights proposed by the language model. Now that the tasks are

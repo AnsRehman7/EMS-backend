@@ -2,7 +2,7 @@ const prisma = require("../db/prisma");
 const ApiError = require("../utils/apiError");
 const { hasPermission, PERMISSIONS } = require("../utils/permissions");
 const { calculateWeightedProjectProgress } = require("./analysis.service");
-const { generatePlan } = require("./planning.service");
+const { approvePlan, generatePlan } = require("./planning.service");
 const { notifyProjectActivity, safelyNotify } = require("./notification.service");
 const { buildChangeSet, listEntityActivity, safelyRecordAudit } = require("./audit.service");
 const { serializeTask, taskInclude } = require("./task.service");
@@ -405,10 +405,19 @@ const createProject = async (currentUser, payload) => {
   let planningPlan = null;
   let planningWarning = "";
   if (payload.generateTasksWithAi) {
+    // Ticking "generate" at creation is the creator's approval: they hold PROJECTS_EDIT,
+    // the same permission approvePlan requires. Approving materializes the tasks and
+    // re-weights them with the effort model. Tasks start unassigned so nobody is notified
+    // about work the creator has not yet looked at.
+    let draft = null;
     try {
-      planningPlan = await generatePlan(currentUser, project.id);
+      draft = await generatePlan(currentUser, project.id);
+      planningPlan = await approvePlan(currentUser, project.id, draft.id, { useRecommendations: false });
     } catch (error) {
-      planningWarning = "The project was created, but its draft plan could not be generated. Open Planning studio to retry.";
+      planningPlan = draft;
+      planningWarning = draft
+        ? `The project and its draft plan v${draft.version} were created, but its tasks could not be created automatically. Open Planning studio to approve the plan.`
+        : "The project was created, but its task plan could not be generated. Open Planning studio to retry.";
       console.warn(`[planning] Initial plan for project ${project.id} failed:`, error.message);
     }
   }
